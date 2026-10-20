@@ -1,0 +1,52 @@
+-- examples/qr_cli.sea — Utilitário de linha de comando para ler e gerar QR Codes.
+--
+-- Uso:
+--   sea examples/qr_cli.sea read <arquivo.png|bmp|pgm|svg>
+--   sea examples/qr_cli.sea write "<texto>" [saida.png|svg] [L|M|Q|H]
+
+local qrcode = require("../qrcode")
+
+if len(os.args) < 3 then
+    io.write_err("Uso:\n")
+    io.write_err("  sea examples/qr_cli.sea read <arquivo.png|bmp|pgm|pbm|svg>\n")
+    io.write_err("  sea examples/qr_cli.sea write \"<texto>\" [arquivo_saida.png|svg] [L|M|Q|H]\n")
+    os.exit(2)
+end
+
+local cmd = string.lower(os.args[1])
+local arg1 = os.args[2]
+
+if cmd == "read" or cmd == "decode" then
+    local res = qrcode.decode(arg1)
+    if is_error(res) then
+        io.write_err("Erro ao ler QR Code: ", res.message, "\n")
+        os.exit(1)
+    end
+    printf("Texto     : %s\n", res.text)
+    printf("Versão    : V%d (%dx%d)\n", res.version, res.size, res.size)
+    printf("Nível EC  : %s | Máscara: %d | Modo: %s\n", res.ec_level, res.mask, res.mode)
+    printf("Tipo      : %s\n", res.payload.type)
+    if res.errors_corrected > 0 then
+        printf("Correções : %d erro(s) corrigido(s) via Reed-Solomon/BCH\n", res.errors_corrected)
+    end
+elseif cmd == "write" or cmd == "encode" then
+    local out_file = os.args[3]
+    local ec = os.args[4] or "M"
+    local qr = qrcode.encode(arg1, {ec_level = ec})
+    if is_error(qr) then
+        io.write_err("Erro ao codificar QR Code: ", qr.message, "\n")
+        os.exit(1)
+    end
+    print(qr:to_terminal({border = 2}))
+    if out_file then
+        local ok = qr:save(out_file, {scale = 8, border = 4})
+        if is_error(ok) then
+            io.write_err("Erro ao salvar arquivo: ", ok.message, "\n")
+            os.exit(1)
+        end
+        printf("\nSalvo em %s (V%d-%s, %dx%d módulos)\n", out_file, qr.version, qr.ec_level, qr.size, qr.size)
+    end
+else
+    io.write_err("Comando desconhecido: ", cmd, " (use 'read' ou 'write')\n")
+    os.exit(2)
+end

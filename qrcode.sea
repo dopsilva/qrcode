@@ -1,0 +1,233 @@
+-- qrcode.sea — Pure Sea QR Code Library (ISO/IEC 18004 Reading & Writing, Versions 1..40, EC L/M/Q/H).
+--
+-- High-level API:
+--   qrcode.encode(text [, opts])         → QRCode|error
+--   qrcode.write(text, path [, opts])    → true|error
+--   qrcode.decode(source [, opts])       → { text, bytes, version, ec_level, mask, mode, payload, ... }|error
+--   qrcode.read(source [, opts])         → string|error
+--   qrcode.to_png(text [, opts])         → string (PNG bytes)|error
+--   qrcode.to_svg(text [, opts])         → string (SVG XML)|error
+--   qrcode.to_bmp(text [, opts])         → string (BMP bytes)|error
+--   qrcode.to_pgm(text [, opts])         → string (PGM bytes)|error
+--   qrcode.to_ascii(text [, opts])       → string|error
+--   qrcode.to_terminal(text [, opts])    → string (Unicode half-blocks)|error
+--   qrcode.to_image(text [, opts])       → Image|error
+--
+-- Submodules:
+--   qrcode.tables       — ISO/IEC 18004 capacity, alignment, BCH format/version tables (V1..V40)
+--   qrcode.rs           — GF(2^8) Reed-Solomon encoder & Berlekamp-Massey/Chien/Forney decoder
+--   qrcode.matrix       — 2D QR module grid, function patterns, 8 masks & penalty evaluation
+--   qrcode.image        — PNG, BMP, PGM/PPM/PBM, SVG, ASCII & Terminal rendering and decoding
+--   qrcode.detector     — Otsu/adaptive binarization, 1:1:3:1:1 finder scanner & perspective grid sampler
+--   qrcode.payload      — PIX (BR Code EMV + CRC16), Wi-Fi, vCard 3.0, TOTP 2FA, Mailto, SMS, Geo
+
+local tables = require("./tables")
+local rs = require("./reed_solomon")
+local matrix = require("./matrix")
+local image = require("./image")
+local encode_mod = require("./encode")
+local decode_mod = require("./decode")
+local detector = require("./detector")
+local payload = require("./payload")
+
+local M = {}
+
+M.tables = tables
+M.rs = rs
+M.reed_solomon = rs
+M.matrix = matrix
+M.image = image
+M.detector = detector
+M.payload = payload
+
+-- qrcode.encode(text [, opts]) → QRCode|error
+function M.encode(text, opts)
+    return encode_mod.encode(text, opts)
+end
+
+-- qrcode.write(text, file_path [, opts]) → true|error
+function M.write(text, file_path, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:save(file_path, opts)
+end
+
+-- qrcode.to_image(text [, opts]) → Image|error
+function M.to_image(text, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:to_image(opts)
+end
+
+-- qrcode.to_png(text [, opts]) → string (PNG bytes)|error
+function M.to_png(text, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:to_png(opts)
+end
+
+-- qrcode.to_svg(text [, opts]) → string (SVG XML)|error
+function M.to_svg(text, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:to_svg(opts)
+end
+
+-- qrcode.to_bmp(text [, opts]) → string (BMP bytes)|error
+function M.to_bmp(text, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:to_bmp(opts)
+end
+
+-- qrcode.to_pgm(text [, opts]) → string (PGM bytes)|error
+function M.to_pgm(text, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:to_pgm(opts)
+end
+
+-- qrcode.to_ascii(text [, opts]) → string|error
+function M.to_ascii(text, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:to_ascii(opts)
+end
+
+-- qrcode.to_terminal(text [, opts]) → string|error
+function M.to_terminal(text, opts)
+    local qr = encode_mod.encode(text, opts)?
+    return qr:to_terminal(opts)
+end
+
+-- Convert a 2D array [ [0, 1, ...], ... ] into a Matrix
+local function array2d_to_matrix(arr)
+    local s = len(arr)
+    if s < 21 or tables.size_to_version(s) == nil then
+        return error(`qrcode.decode: invalid 2D array dimension ${s}x${s}`)
+    end
+    local mat = matrix.new(s)
+    for y = 0, s - 1 do
+        local row = arr[y]
+        if type(row) ~= "array" and type(row) ~= "int_array" then
+            return error("qrcode.decode: expected 2D array of rows")
+        end
+        for x = 0, math.min(s, len(row)) - 1 do
+            local v = row[x]
+            mat:set(x, y, (v ~= 0 and v ~= false) and 1 or 0)
+        end
+    end
+    return mat
+end
+
+-- Convert a multiline ASCII representation ("##" / "  " or "#" / ".") into an Image
+local function ascii_to_image(art)
+    local raw_lines = string.splitlines(art)
+    local lines = []
+    for _, line in raw_lines do
+        if len(string.trim(line)) > 0 then
+            lines[] = line
+        end
+    end
+    if len(lines) < 21 then
+        return error("qrcode.decode: ASCII art has fewer than 21 lines")
+    end
+    -- Detect if double-character modules ("##" / "  ") were used
+    local h = len(lines)
+    local w = len(lines[0])
+    if w >= h * 2 - 2 and w % 2 == 0 then
+        local norm_lines = []
+        for _, line in lines do
+            local row = []
+            local i = 1
+            while i <= len(line) do
+                local ch = string.sub(line, i, i)
+                row[] = (ch == " " or ch == ".") and "." or "#"
+                i += 2
+            end
+            norm_lines[] = string.join(row, "")
+        end
+        return image.from_ascii(string.join(norm_lines, "\n"), {scale = 4, pad = 8})
+    end
+    return image.from_ascii(string.join(lines, "\n"), {scale = 4, pad = 8})
+end
+
+-- qrcode.decode_matrix(mat) → DecodeResult|error
+function M.decode_matrix(mat)
+    local res = decode_mod.decode_matrix(mat)?
+    local out = {}
+    for k, v in res do out[k] = v end
+    out.payload = payload.parse(res.text)
+    return out
+end
+
+-- qrcode.decode(source [, opts]) → DecodeResult|error
+-- Accepts:
+--   - file path (".png", ".bmp", ".pgm", ".pbm", ".ppm", ".svg")
+--   - raw image bytes (PNG, BMP, PNM, SVG)
+--   - Image object ({ width, height, data })
+--   - QRCode or Matrix object ({ size, modules })
+--   - 2D array ([ [1, 0, ...], ... ])
+--   - ASCII art string
+function M.decode(source, opts)
+    opts = opts or {}
+    if source == nil then
+        return error("qrcode.decode: source cannot be nil")
+    end
+
+    -- 1. QRCode or Matrix object
+    if (type(source) == "table" or type(source) == "struct") and source.size and source.modules then
+        local m = source.matrix or source
+        return M.decode_matrix(m)
+    end
+
+    -- 2. 2D array
+    if type(source) == "array" then
+        local m = array2d_to_matrix(source)?
+        return M.decode_matrix(m)
+    end
+
+    -- 3. Resolve Image from path, raw bytes, ASCII string, or Image table
+    local img = nil
+    if type(source) == "table" and source.width and source.height and source.data then
+        img = source
+    elseif type(source) == "string" then
+        -- Check if it's raw image bytes first (PNG magic, BMP magic, PNM, SVG)
+        if (len(source) >= 8 and string.sub(source, 1, 8) == "\x89PNG\r\n\x1a\n") or
+            (len(source) >= 54 and string.sub(source, 1, 2) == "BM") or
+            string.contains(source, "<svg") then
+            img = image.decode(source)?
+        elseif len(source) >= 3 and string.sub(source, 1, 1) == "P" and
+            string.sub(source, 2, 2) >= "1" and string.sub(source, 2, 2) <= "6" and
+            (string.byte(source, 3) == 10 or string.byte(source, 3) == 32 or string.byte(source, 3) == 13) then
+            img = image.decode(source)?
+        elseif string.contains(source, "\n") then
+            img = ascii_to_image(source)?
+        elseif fs.isfile(source) then
+            img = image.load(source)?
+        else
+            return error(`qrcode.decode: file not found or unrecognized source format: ${source}`)
+        end
+    else
+        return error(`qrcode.decode: unsupported source type '${type(source)}'`)
+    end
+
+    -- 4. Detect candidate QR matrices and decode
+    local candidates = detector.detect(img, opts)
+    local last_err = nil
+    for _, cand in candidates do
+        local res = decode_mod.decode_matrix(cand.matrix)
+        if not is_error(res) then
+            local out = {}
+            for k, v in res do out[k] = v end
+            out.bbox = cand.bbox
+            out.corners = cand.corners
+            out.payload = payload.parse(res.text)
+            return out
+        end
+        last_err = res
+    end
+
+    return last_err or error("qrcode.decode: no valid QR Code detected in image")
+end
+
+-- qrcode.read(source [, opts]) → string|error
+function M.read(source, opts)
+    local res = M.decode(source, opts)?
+    return res.text
+end
+
+return M

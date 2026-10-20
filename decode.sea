@@ -1,0 +1,457 @@
+-- decode.sea — QR Code matrix decoder (Format/Version BCH, De-interleaving, Reed-Solomon, Bitstream parser).
+
+local tables = require("./tables")
+local rs = require("./reed_solomon")
+local matrix = require("./matrix")
+
+local M = {}
+
+local function new_bit_reader(bytes)
+    local r = {}
+    r.bytes = bytes
+    r.total_bits = len(bytes) * 8
+    r.bit_pos = 0
+
+    function r:available()
+        return self.total_bits - self.bit_pos
+    end
+
+    function r:read(nbits)
+        if nbits <= 0 then
+            return 0
+        end
+        if self.bit_pos + nbits > self.total_bits then
+            return nil
+        end
+        local val = 0
+        for _ = 0, nbits - 1 do
+            local byte_idx = self.bit_pos >> 3
+            local shift = 7 - (self.bit_pos & 7)
+            local bit = (self.bytes[byte_idx] >> shift) & 1
+            val = (val << 1) | bit
+            self.bit_pos += 1
+        end
+        return val
+    end
+
+    return r
+end
+
+-- Parse the decoded data codeword bytes into text and segments
+function M.parse_bitstream(data_bytes, version)
+    local reader = new_bit_reader(data_bytes)
+    local out_chunks = []
+    local out_bytes = int_array(len(data_bytes))
+    local segments = []
+    local primary_mode = nil
+    local eci = nil
+
+    while reader:available() >= 4 do
+        local mode_id = reader:read(4)
+        if mode_id == nil or mode_id == tables.MODE_TERMINATOR then
+            break
+        elseif mode_id == tables.MODE_ECI then
+            local b1 = reader:read(8)
+            if b1 == nil then return error("decode: truncated ECI header") end
+            if (b1 & 0x80) == 0 then
+                eci = b1 & 0x7F
+            elseif (b1 & 0xC0) == 0x80 then
+                local b2 = reader:read(8)
+                if b2 == nil then return error("decode: truncated 2-byte ECI") end
+                eci = ((b1 & 0x3F) << 8) | b2
+            elseif (b1 & 0xE0) == 0xC0 then
+                local b2 = reader:read(16)
+                if b2 == nil then return error("decode: truncated 3-byte ECI") end
+                eci = ((b1 & 0x1F) << 16) | b2
+            else
+                return error("decode: invalid ECI header byte")
+            end
+        elseif mode_id == tables.MODE_STRUCTURED_APPEND then
+            local seq = reader:read(8)
+            local parity = reader:read(8)
+            if seq == nil or parity == nil then
+                return error("decode: truncated structured append header")
+            end
+            segments[] = {mode = "structured_append", seq = seq, parity = parity}
+        elseif mode_id == tables.MODE_FNC1_FIRST or mode_id == tables.MODE_FNC1_SECOND then
+            if mode_id == tables.MODE_FNC1_SECOND then
+                local _ = reader:read(8)
+            end
+        elseif mode_id == tables.MODE_NUMERIC then
+            local cc_bits = tables.char_count_bits(tables.MODE_NUMERIC, version)
+            local count = reader:read(cc_bits)
+            if count == nil then
+                return error("decode: truncated numeric count")
+            end
+            local chars = []
+            local rem = count
+            while rem >= 3 do
+                local v = reader:read(10)
+                if v == nil or v >= 1000 then
+                    return error("decode: invalid 10-bit numeric group")
+                end
+                local d0 = (v // 100) + 48
+                local d1 = ((v // 10) % 10) + 48
+                local d2 = (v % 10) + 48
+                chars[] = string.char(d0, d1, d2)
+                out_bytes[] = d0
+                out_bytes[] = d1
+                out_bytes[] = d2
+                rem -= 3
+            end
+            if rem == 2 then
+                local v = reader:read(7)
+                if v == nil or v >= 100 then
+                    return error("decode: invalid 7-bit numeric group")
+                end
+                local d0 = (v // 10) + 48
+                local d1 = (v % 10) + 48
+                chars[] = string.char(d0, d1)
+                out_bytes[] = d0
+                out_bytes[] = d1
+            elseif rem == 1 then
+                local v = reader:read(4)
+                if v == nil or v >= 10 then
+                    return error("decode: invalid 4-bit numeric digit")
+                end
+                local d0 = v + 48
+                chars[] = string.char(d0)
+                out_bytes[] = d0
+            end
+            local seg_str = string.join(chars, "")
+            out_chunks[] = seg_str
+            segments[] = {mode = "numeric", data = seg_str}
+            if not primary_mode then
+                primary_mode = "numeric"
+            elseif primary_mode ~= "numeric" then
+                primary_mode = "mixed"
+            end
+        elseif mode_id == tables.MODE_ALPHANUMERIC then
+            local cc_bits = tables.char_count_bits(tables.MODE_ALPHANUMERIC, version)
+            local count = reader:read(cc_bits)
+            if count == nil then
+                return error("decode: truncated alphanumeric count")
+            end
+            local chars = []
+            local rem = count
+            local atbl = tables.ALPHANUM_CHARS
+            while rem >= 2 do
+                local v = reader:read(11)
+                if v == nil or v >= 2025 then
+                    return error("decode: invalid 11-bit alphanumeric pair")
+                end
+                local i0 = (v // 45) + 1
+                local i1 = (v % 45) + 1
+                local c0 = string.sub(atbl, i0, i0)
+                local c1 = string.sub(atbl, i1, i1)
+                chars[] = c0 .. c1
+                out_bytes[] = string.byte(c0, 1)
+                out_bytes[] = string.byte(c1, 1)
+                rem -= 2
+            end
+            if rem == 1 then
+                local v = reader:read(6)
+                if v == nil or v >= 45 then
+                    return error("decode: invalid 6-bit alphanumeric tail")
+                end
+                local i0 = v + 1
+                local c0 = string.sub(atbl, i0, i0)
+                chars[] = c0
+                out_bytes[] = string.byte(c0, 1)
+            end
+            local seg_str = string.join(chars, "")
+            out_chunks[] = seg_str
+            segments[] = {mode = "alphanumeric", data = seg_str}
+            if not primary_mode then
+                primary_mode = "alphanumeric"
+            elseif primary_mode ~= "alphanumeric" then
+                primary_mode = "mixed"
+            end
+        elseif mode_id == tables.MODE_BYTE then
+            local cc_bits = tables.char_count_bits(tables.MODE_BYTE, version)
+            local count = reader:read(cc_bits)
+            if count == nil then
+                return error("decode: truncated byte count")
+            end
+            if reader:available() < count * 8 then
+                return error("decode: byte segment exceeds available bits")
+            end
+            local chars = []
+            for _ = 0, count - 1 do
+                local b = reader:read(8)
+                chars[] = string.char(b)
+                out_bytes[] = b
+            end
+            local seg_str = string.join(chars, "")
+            out_chunks[] = seg_str
+            segments[] = {mode = "byte", data = seg_str}
+            if not primary_mode then
+                primary_mode = "byte"
+            elseif primary_mode ~= "byte" then
+                primary_mode = "mixed"
+            end
+        elseif mode_id == tables.MODE_KANJI then
+            local cc_bits = tables.char_count_bits(tables.MODE_KANJI, version)
+            local count = reader:read(cc_bits)
+            if count == nil then
+                return error("decode: truncated kanji count")
+            end
+            local chars = []
+            for _ = 0, count - 1 do
+                local v = reader:read(13)
+                if v == nil then
+                    return error("decode: truncated kanji character")
+                end
+                local prod = ((v // 0xC0) << 8) | (v % 0xC0)
+                local sjis = prod + ((prod < 0x1F00) and 0x8140 or 0xC140)
+                local hi = (sjis >> 8) & 0xFF
+                local lo = sjis & 0xFF
+                chars[] = string.char(hi, lo)
+                out_bytes[] = hi
+                out_bytes[] = lo
+            end
+            local seg_str = string.join(chars, "")
+            out_chunks[] = seg_str
+            segments[] = {mode = "kanji", data = seg_str}
+            if not primary_mode then
+                primary_mode = "kanji"
+            elseif primary_mode ~= "kanji" then
+                primary_mode = "mixed"
+            end
+        else
+            return error(`decode: unsupported mode indicator ${mode_id}`)
+        end
+    end
+
+    return {
+        text = string.join(out_chunks, ""),
+        bytes = out_bytes,
+        segments = segments,
+        mode = primary_mode or "byte",
+        eci = eci,
+    }
+end
+
+-- Attempt decoding with a specific (version, ec_level, mask) on an oriented matrix
+local function try_decode_with_format(raw_mat, version, ec_level, mask, fmt_errors)
+    local s = raw_mat.size
+    local ref = matrix.new(s, version)
+    matrix.setup_function_patterns(ref)
+
+    local work = raw_mat:clone()
+    work.version = version
+    for i = 0, s * s - 1 do
+        work.is_func[i] = ref.is_func[i]
+    end
+
+    matrix.apply_mask(work, mask)
+    local raw_cw = matrix.extract_codewords(work)
+    local binfo = tables.block_info(version, ec_level)?
+
+    if len(raw_cw) < binfo.total_cw then
+        return error("decode: extracted fewer codewords than required")
+    end
+
+    -- De-interleave data and EC blocks
+    local data_blocks = []
+    local ec_blocks = []
+    for _ = 0, binfo.g1_blocks - 1 do
+        local d = int_array(binfo.g1_data_cw)
+        for _ = 0, binfo.g1_data_cw - 1 do d[] = 0 end
+        data_blocks[] = d
+    end
+    for _ = 0, binfo.g2_blocks - 1 do
+        local d = int_array(binfo.g2_data_cw)
+        for _ = 0, binfo.g2_data_cw - 1 do d[] = 0 end
+        data_blocks[] = d
+    end
+    for _ = 0, binfo.num_blocks - 1 do
+        local e = int_array(binfo.ec_cw_per_block)
+        for _ = 0, binfo.ec_cw_per_block - 1 do e[] = 0 end
+        ec_blocks[] = e
+    end
+
+    local pos = 0
+    local max_data_len = (binfo.g2_blocks > 0) and binfo.g2_data_cw or binfo.g1_data_cw
+    for col = 0, max_data_len - 1 do
+        for b = 0, binfo.num_blocks - 1 do
+            local blk = data_blocks[b]
+            if col < len(blk) then
+                blk[col] = raw_cw[pos]
+                pos += 1
+            end
+        end
+    end
+
+    for col = 0, binfo.ec_cw_per_block - 1 do
+        for b = 0, binfo.num_blocks - 1 do
+            ec_blocks[b][col] = raw_cw[pos]
+            pos += 1
+        end
+    end
+
+    -- Run Reed-Solomon error correction on each block
+    local all_data = int_array(binfo.data_cw)
+    local total_rs_errors = 0
+    for b = 0, binfo.num_blocks - 1 do
+        local dblk = data_blocks[b]
+        local eblk = ec_blocks[b]
+        local cw = int_array(len(dblk) + len(eblk))
+        for i = 0, len(dblk) - 1 do cw[] = dblk[i] end
+        for i = 0, len(eblk) - 1 do cw[] = eblk[i] end
+
+        local dec = rs.decode(cw, binfo.ec_cw_per_block)?
+        total_rs_errors += dec.errors_corrected
+        for i = 0, len(dec.data) - 1 do
+            all_data[] = dec.data[i]
+        end
+    end
+
+    local parsed = M.parse_bitstream(all_data, version)?
+    return {
+        text = parsed.text,
+        bytes = parsed.bytes,
+        segments = parsed.segments,
+        mode = parsed.mode,
+        eci = parsed.eci,
+        version = version,
+        ec_level = ec_level,
+        mask = mask,
+        size = s,
+        format_errors = fmt_errors,
+        rs_errors = total_rs_errors,
+        errors_corrected = fmt_errors + total_rs_errors,
+        rotation = 0,
+        mirrored = false,
+        bbox = nil,
+        corners = nil,
+    }
+end
+
+-- Check if a matrix has finder patterns in the expected TL, TR, BL corners
+local function finder_score(mat)
+    local s = mat.size
+    local function check_box(ox, oy)
+        local matches = 0
+        for dy = 0, 6 do
+            for dx = 0, 6 do
+                local expected = (dx == 0 or dx == 6 or dy == 0 or dy == 6 or
+                    (dx >= 2 and dx <= 4 and dy >= 2 and dy <= 4)) and 1 or 0
+                if mat:get(ox + dx, oy + dy) == expected then
+                    matches += 1
+                end
+            end
+        end
+        return matches
+    end
+    return check_box(0, 0) + check_box(s - 7, 0) + check_box(0, s - 7)
+end
+
+-- Rotate a matrix 90 degrees clockwise
+function M.rotate_90_cw(mat)
+    local s = mat.size
+    local out = matrix.new(s, mat.version)
+    for y = 0, s - 1 do
+        for x = 0, s - 1 do
+            out:set(s - 1 - y, x, mat:get(x, y))
+        end
+    end
+    return out
+end
+
+-- Transpose (mirror across main diagonal) a matrix
+function M.transpose(mat)
+    local s = mat.size
+    local out = matrix.new(s, mat.version)
+    for y = 0, s - 1 do
+        for x = 0, s - 1 do
+            out:set(y, x, mat:get(x, y))
+        end
+    end
+    return out
+end
+
+local function decode_single_orientation(mat)
+    local s = mat.size
+    local version = tables.size_to_version(s)
+    if not version then
+        return error(`decode: invalid QR matrix size ${s}x${s}`)
+    end
+    if finder_score(mat) < 105 then
+        return error("decode: finder patterns not aligned in this orientation")
+    end
+    if s >= 45 then
+        local vinfo = matrix.read_version_info(mat)
+        if vinfo and tables.version_size(vinfo.version) == s then
+            version = vinfo.version
+        end
+    end
+
+    local fmt = matrix.read_format_info(mat)
+    if fmt then
+        local res = try_decode_with_format(mat, version, fmt.ec_level, fmt.mask, fmt.errors)
+        if not is_error(res) then
+            return res
+        end
+        if fmt.errors <= 1 then
+            return res
+        end
+    end
+
+    -- Fallback when format info is heavily damaged: try all 32 (ec_level, mask) pairs
+    for _, lvl in tables.EC_LEVELS do
+        for m = 0, 7 do
+            local res = try_decode_with_format(mat, version, lvl, m, 4)
+            if not is_error(res) then
+                return res
+            end
+        end
+    end
+    return error("decode: unable to decode QR matrix")
+end
+
+-- decode.decode_matrix(mat) → DecodeResult|error
+-- Automatically handles 0°, 90°, 180°, 270° rotations and mirrored matrices.
+function M.decode_matrix(mat)
+    if not mat or not mat.size or not mat.modules then
+        return error("decode.decode_matrix: expected Matrix object")
+    end
+
+    -- Rank the 4 rotations by finder pattern match score so standard orientation runs first
+    local candidates = []
+    local cur = mat
+    for rot = 0, 3 do
+        candidates[] = {mat = cur, rotation = rot * 90, mirrored = false, score = finder_score(cur)}
+        cur = M.rotate_90_cw(cur)
+    end
+    sort.by(candidates, "score", true)
+
+    local last_err = nil
+    for _, c in candidates do
+        local res = decode_single_orientation(c.mat)
+        if not is_error(res) then
+            res.rotation = c.rotation
+            res.mirrored = false
+            return res
+        end
+        last_err = res
+    end
+
+    -- Try mirrored (transposed) orientations as fallback
+    local mir = M.transpose(mat)
+    for rot = 0, 3 do
+        if finder_score(mir) >= 100 then
+            local res = decode_single_orientation(mir)
+            if not is_error(res) then
+                res.rotation = rot * 90
+                res.mirrored = true
+                return res
+            end
+        end
+        mir = M.rotate_90_cw(mir)
+    end
+
+    return last_err or error("decode.decode_matrix: failed to decode QR Code")
+end
+
+return M

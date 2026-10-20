@@ -1,0 +1,338 @@
+-- tables.sea — ISO/IEC 18004 QR Code specification tables (Versions 1..40, EC levels L/M/Q/H).
+
+local M = {}
+
+-- Error Correction Level IDs and Format Info 2-bit indicators:
+-- L (~7%)  -> format bits 01 (1)
+-- M (~15%) -> format bits 00 (0)
+-- Q (~25%) -> format bits 11 (3)
+-- H (~30%) -> format bits 10 (2)
+M.EC_LEVELS = ["L", "M", "Q", "H"]
+
+M.EC_FORMAT_BITS = {
+    L = 1,
+    M = 0,
+    Q = 3,
+    H = 2,
+}
+
+M.FORMAT_BITS_TO_EC = {
+    [1] = "L",
+    [0] = "M",
+    [3] = "Q",
+    [2] = "H",
+}
+
+-- Mode indicators (4 bits)
+M.MODE_TERMINATOR = 0
+M.MODE_NUMERIC = 1
+M.MODE_ALPHANUMERIC = 2
+M.MODE_STRUCTURED_APPEND = 3
+M.MODE_BYTE = 4
+M.MODE_FNC1_FIRST = 5
+M.MODE_ECI = 7
+M.MODE_KANJI = 8
+M.MODE_FNC1_SECOND = 9
+
+-- Alphanumeric mode 45-character table (0..44)
+M.ALPHANUM_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:"
+
+local alphanum_map = [=]
+for i = 1, len(M.ALPHANUM_CHARS) do
+    local ch = string.sub(M.ALPHANUM_CHARS, i, i)
+    alphanum_map[ch] = i - 1
+    alphanum_map[string.byte(M.ALPHANUM_CHARS, i)] = i - 1
+end
+M.ALPHANUM_MAP = alphanum_map
+
+-- Character count indicator bit lengths by version range:
+-- Tier 0: versions 1..9
+-- Tier 1: versions 10..26
+-- Tier 2: versions 27..40
+function M.char_count_bits(mode, version)
+    local tier = 0
+    if version >= 27 then
+        tier = 2
+    elseif version >= 10 then
+        tier = 1
+    end
+    if mode == M.MODE_NUMERIC then
+        local bits = [10, 12, 14]
+        return bits[tier]
+    elseif mode == M.MODE_ALPHANUMERIC then
+        local bits = [9, 11, 13]
+        return bits[tier]
+    elseif mode == M.MODE_BYTE then
+        local bits = [8, 16, 16]
+        return bits[tier]
+    elseif mode == M.MODE_KANJI then
+        local bits = [8, 10, 12]
+        return bits[tier]
+    end
+    return 8
+end
+
+-- Remainder bits required after all codewords for versions 1..40 (1-indexed via version)
+M.REMAINDER_BITS = [
+    0, -- unused 0
+    0, 7, 7, 7, 7, 7, 0, 0, 0, 0,
+    0, 0, 0, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 3, 3, 3,
+    3, 3, 3, 3, 0, 0, 0, 0, 0, 0,
+]
+
+-- Alignment pattern center coordinates for versions 1..40 (index = version)
+M.ALIGNMENT_POS = [
+    [],
+    [],
+    [6, 18],
+    [6, 22],
+    [6, 26],
+    [6, 30],
+    [6, 34],
+    [6, 22, 38],
+    [6, 24, 42],
+    [6, 26, 46],
+    [6, 28, 50],
+    [6, 30, 54],
+    [6, 32, 58],
+    [6, 34, 62],
+    [6, 26, 46, 66],
+    [6, 26, 48, 70],
+    [6, 26, 50, 74],
+    [6, 30, 54, 78],
+    [6, 30, 56, 82],
+    [6, 30, 58, 86],
+    [6, 34, 62, 90],
+    [6, 28, 50, 72, 94],
+    [6, 26, 50, 74, 98],
+    [6, 30, 54, 78, 102],
+    [6, 28, 54, 80, 106],
+    [6, 32, 58, 84, 110],
+    [6, 30, 58, 86, 114],
+    [6, 34, 62, 90, 118],
+    [6, 26, 50, 74, 98, 122],
+    [6, 30, 54, 78, 102, 126],
+    [6, 26, 52, 78, 104, 130],
+    [6, 30, 56, 82, 108, 134],
+    [6, 34, 60, 86, 112, 138],
+    [6, 30, 58, 86, 114, 142],
+    [6, 34, 62, 90, 118, 146],
+    [6, 30, 54, 78, 102, 126, 150],
+    [6, 24, 50, 76, 102, 128, 154],
+    [6, 28, 54, 80, 106, 132, 158],
+    [6, 32, 58, 84, 110, 136, 162],
+    [6, 26, 54, 82, 110, 138, 166],
+    [6, 30, 58, 86, 114, 142, 170],
+]
+
+-- Total codewords (data + EC) for each version 1..40.
+-- Can be computed from function module counts, or looked up directly:
+M.TOTAL_CODEWORDS = [
+    0,
+    26, 44, 70, 100, 134, 172, 196, 242, 292, 346,
+    404, 466, 532, 581, 655, 733, 815, 901, 991, 1085,
+    1156, 1258, 1364, 1474, 1588, 1706, 1828, 1921, 2051, 2185,
+    2323, 2465, 2611, 2761, 2876, 3034, 3196, 3362, 3532, 3706,
+]
+
+-- EC_CODEWORDS_PER_BLOCK[level][version] (version 1..40)
+M.EC_CODEWORDS_PER_BLOCK = {
+    L = [
+        0,
+        7, 10, 15, 20, 26, 18, 20, 24, 30, 18,
+        20, 24, 26, 30, 22, 24, 28, 30, 28, 28,
+        28, 28, 30, 30, 26, 28, 30, 30, 30, 30,
+        30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+    ],
+    M = [
+        0,
+        10, 16, 26, 18, 24, 16, 18, 22, 22, 26,
+        30, 22, 22, 24, 24, 28, 28, 26, 26, 26,
+        26, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+        28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+    ],
+    Q = [
+        0,
+        13, 22, 18, 26, 18, 24, 18, 22, 20, 24,
+        28, 26, 24, 20, 30, 24, 28, 28, 26, 30,
+        28, 30, 30, 30, 30, 28, 30, 30, 30, 30,
+        30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+    ],
+    H = [
+        0,
+        17, 28, 22, 16, 22, 28, 26, 26, 24, 28,
+        24, 28, 22, 24, 24, 30, 28, 28, 26, 28,
+        30, 24, 30, 30, 30, 30, 30, 30, 30, 30,
+        30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+    ],
+}
+
+-- NUM_EC_BLOCKS[level][version] = total number of Reed-Solomon blocks (G1 + G2)
+M.NUM_EC_BLOCKS = {
+    L = [
+        0,
+        1, 1, 1, 1, 1, 2, 2, 2, 2, 4,
+        4, 4, 4, 4, 6, 6, 6, 6, 7, 8,
+        8, 9, 9, 10, 12, 12, 12, 13, 14, 15,
+        16, 17, 18, 19, 19, 20, 21, 22, 24, 25,
+    ],
+    M = [
+        0,
+        1, 1, 1, 2, 2, 4, 4, 4, 5, 5,
+        5, 8, 9, 9, 10, 10, 11, 13, 14, 16,
+        17, 17, 18, 20, 21, 23, 25, 26, 28, 29,
+        31, 33, 35, 37, 38, 40, 43, 45, 47, 49,
+    ],
+    Q = [
+        0,
+        1, 1, 2, 2, 4, 4, 6, 6, 8, 8,
+        8, 10, 12, 16, 12, 17, 16, 18, 21, 20,
+        23, 23, 25, 27, 29, 34, 34, 35, 38, 40,
+        43, 45, 48, 51, 53, 56, 59, 62, 65, 68,
+    ],
+    H = [
+        0,
+        1, 1, 2, 4, 4, 4, 5, 6, 8, 8,
+        11, 11, 16, 16, 18, 16, 19, 21, 25, 25,
+        25, 34, 30, 32, 35, 37, 40, 42, 45, 48,
+        51, 54, 57, 60, 63, 66, 70, 74, 77, 81,
+    ],
+}
+
+-- tables.version_size(version) → module dimension (21..177)
+function M.version_size(version)
+    return 17 + 4 * version
+end
+
+-- tables.size_to_version(size) → version (1..40) or nil
+function M.size_to_version(size)
+    if size < 21 or size > 177 or (size - 17) % 4 ~= 0 then
+        return nil
+    end
+    return (size - 17) // 4
+end
+
+-- tables.block_info(version, ec_level) →
+--   { total_cw, data_cw, ec_cw_per_block, num_blocks, g1_blocks, g1_data_cw, g2_blocks, g2_data_cw }
+function M.block_info(version, ec_level)
+    local lvl = string.upper(ec_level or "M")
+    local ec_per_blk_tbl = M.EC_CODEWORDS_PER_BLOCK[lvl]
+    local num_blk_tbl = M.NUM_EC_BLOCKS[lvl]
+    if not ec_per_blk_tbl or version < 1 or version > 40 then
+        return error(`tables.block_info: invalid version (${version}) or EC level (${ec_level})`)
+    end
+    local total_cw = M.TOTAL_CODEWORDS[version]
+    local ec_cw = ec_per_blk_tbl[version]
+    local num_blocks = num_blk_tbl[version]
+    local total_ec = ec_cw * num_blocks
+    local total_data = total_cw - total_ec
+
+    local g2_blocks = total_cw % num_blocks
+    local g1_blocks = num_blocks - g2_blocks
+    local g1_total_cw = total_cw // num_blocks
+    local g1_data_cw = g1_total_cw - ec_cw
+    local g2_data_cw = g1_data_cw + 1
+
+    return {
+        version = version,
+        ec_level = lvl,
+        total_cw = total_cw,
+        data_cw = total_data,
+        ec_cw_per_block = ec_cw,
+        num_blocks = num_blocks,
+        g1_blocks = g1_blocks,
+        g1_data_cw = g1_data_cw,
+        g2_blocks = g2_blocks,
+        g2_data_cw = g2_data_cw,
+    }
+end
+
+-- Compute 15-bit Format Information word for (ec_level, mask) with BCH(15, 5) and mask 0x5412
+function M.format_bits(ec_level, mask)
+    local ec_id = M.EC_FORMAT_BITS[string.upper(ec_level)]
+    if ec_id == nil then
+        ec_id = 0
+    end
+    local data = ((ec_id & 3) << 3) | (mask & 7)
+    local rem = data << 10
+    for i = 14, 10, -1 do
+        if ((rem >> i) & 1) ~= 0 then
+            rem = rem ~ (0x537 << (i - 10))
+        end
+    end
+    return ((data << 10) | rem) ~ 0x5412
+end
+
+-- Compute 18-bit Version Information word for version 7..40 with BCH(18, 6) generator 0x1F25
+function M.version_bits(version)
+    if version < 7 or version > 40 then
+        return 0
+    end
+    local rem = version << 12
+    for i = 17, 12, -1 do
+        if ((rem >> i) & 1) ~= 0 then
+            rem = rem ~ (0x1F25 << (i - 12))
+        end
+    end
+    return (version << 12) | rem
+end
+
+-- Count set bits in a 32-bit integer (Hamming weight)
+function M.popcount(x)
+    local c = 0
+    local v = x
+    while v > 0 do
+        c += (v & 1)
+        v = v >> 1
+    end
+    return c
+end
+
+-- Decode a 15-bit Format Info integer (tolerating up to 3 bit errors via nearest Hamming distance)
+function M.decode_format_bits(raw15)
+    local best_dist = 4
+    local best_ec = nil
+    local best_mask = nil
+    for _, lvl in M.EC_LEVELS do
+        for mask = 0, 7 do
+            local candidate = M.format_bits(lvl, mask)
+            local dist = M.popcount((raw15 ~ candidate) & 0x7FFF)
+            if dist < best_dist then
+                best_dist = dist
+                best_ec = lvl
+                best_mask = mask
+                if dist == 0 then
+                    return {ec_level = best_ec, mask = best_mask, errors = 0}
+                end
+            end
+        end
+    end
+    if best_ec ~= nil then
+        return {ec_level = best_ec, mask = best_mask, errors = best_dist}
+    end
+    return nil
+end
+
+-- Decode an 18-bit Version Info integer (tolerating up to 3 bit errors)
+function M.decode_version_bits(raw18)
+    local best_dist = 4
+    local best_ver = nil
+    for ver = 7, 40 do
+        local candidate = M.version_bits(ver)
+        local dist = M.popcount((raw18 ~ candidate) & 0x3FFFF)
+        if dist < best_dist then
+            best_dist = dist
+            best_ver = ver
+            if dist == 0 then
+                return {version = best_ver, errors = 0}
+            end
+        end
+    end
+    if best_ver ~= nil then
+        return {version = best_ver, errors = best_dist}
+    end
+    return nil
+end
+
+return M

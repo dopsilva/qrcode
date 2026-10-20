@@ -1,0 +1,299 @@
+-- qrcode_test.sea — Comprehensive test suite for the Sea QR Code library.
+
+local t = require("sea/test")
+local qrcode = require("./qrcode")
+
+t.describe("GF(2^8) and Reed-Solomon error correction", function()
+    t.it("encodes and corrects up to floor(nsym / 2) corrupted bytes", function()
+        local data = [0x40, 0xD2, 0x75, 0x47, 0x76, 0x17, 0x32, 0x06, 0x27, 0x26, 0x96, 0xC6, 0xC6, 0x96, 0x70, 0xEC]
+        local nsym = 10
+        local ec = qrcode.rs.encode(data, nsym)
+        t.eq(len(ec), nsym)
+
+        local cw = []
+        for _, b in data do cw[] = b end
+        for i = 0, nsym - 1 do cw[] = ec[i] end
+
+        -- Corrupt 5 bytes (maximum correctable for nsym = 10)
+        cw[0] = cw[0] ~ 0xFF
+        cw[3] = cw[3] ~ 0x42
+        cw[9] = cw[9] ~ 0xA5
+        cw[17] = cw[17] ~ 0x19
+        cw[25] = cw[25] ~ 0x81
+
+        local dec = t.no_error(qrcode.rs.decode(cw, nsym))
+        t.eq(dec.errors_corrected, 5)
+        for i = 0, len(data) - 1 do
+            t.eq(dec.data[i], data[i])
+        end
+    end)
+
+    t.it("returns an error when errors exceed floor(nsym / 2)", function()
+        local data = [1, 2, 3, 4, 5, 6, 7, 8]
+        local nsym = 6
+        local ec = qrcode.rs.encode(data, nsym)
+        local cw = []
+        for _, b in data do cw[] = b end
+        for i = 0, nsym - 1 do cw[] = ec[i] end
+
+        -- Corrupt 4 bytes (> 6 // 2 = 3)
+        cw[0] = cw[0] ~ 0x11
+        cw[1] = cw[1] ~ 0x22
+        cw[2] = cw[2] ~ 0x33
+        cw[3] = cw[3] ~ 0x44
+
+        t.is_error(qrcode.rs.decode(cw, nsym))
+    end)
+end)
+
+t.describe("BCH Format and Version information codes", function()
+    t.it("encodes and recovers 15-bit Format Info with up to 3 bit errors", function()
+        for _, lvl in ["L", "M", "Q", "H"] do
+            for mask = 0, 7 do
+                local fbits = qrcode.tables.format_bits(lvl, mask)
+                -- Flip 3 bits at positions 0, 7, 14
+                local corrupted = fbits ~ ((1 << 0) | (1 << 7) | (1 << 14))
+                local dec = qrcode.tables.decode_format_bits(corrupted)
+                t.not_nil(dec)
+                t.eq(dec.ec_level, lvl)
+                t.eq(dec.mask, mask)
+                t.eq(dec.errors, 3)
+            end
+        end
+    end)
+
+    t.it("encodes and recovers 18-bit Version Info (V7..V40) with up to 3 bit errors", function()
+        for ver = 7, 40 do
+            local vbits = qrcode.tables.version_bits(ver)
+            local corrupted = vbits ~ ((1 << 1) | (1 << 9) | (1 << 16))
+            local dec = qrcode.tables.decode_version_bits(corrupted)
+            t.not_nil(dec)
+            t.eq(dec.version, ver)
+            t.eq(dec.errors, 3)
+        end
+    end)
+end)
+
+t.describe("QR Code encoding modes, masks, and versions", function()
+    t.it("auto-detects and round-trips Numeric, Alphanumeric, and Byte modes", function()
+        local num_qr = t.no_error(qrcode.encode("0123456789876543210"))
+        t.eq(num_qr.mode, "numeric")
+        t.eq(t.no_error(qrcode.read(num_qr)), "0123456789876543210")
+
+        local alpha_qr = t.no_error(qrcode.encode("SEA VM 2026: $100% + 50/2 - *OK*"))
+        t.eq(alpha_qr.mode, "alphanumeric")
+        t.eq(t.no_error(qrcode.read(alpha_qr)), "SEA VM 2026: $100% + 50/2 - *OK*")
+
+        local utf8_text = "Olá, Sea! Manipulação de QR Code (leitura & escrita) 🚀"
+        local byte_qr = t.no_error(qrcode.encode(utf8_text, {ec_level = "Q"}))
+        t.eq(byte_qr.mode, "byte")
+        t.eq(t.no_error(qrcode.read(byte_qr)), utf8_text)
+    end)
+
+    t.it("supports all 8 masks (0..7) and all 4 EC levels (L, M, Q, H)", function()
+        for _, lvl in ["L", "M", "Q", "H"] do
+            for mask = 0, 7 do
+                local msg = `MASK-${mask}-LEVEL-${lvl}`
+                local qr = t.no_error(qrcode.encode(msg, {ec_level = lvl, mask = mask}))
+                t.eq(qr.mask, mask)
+                t.eq(qr.ec_level, lvl)
+                local dec = t.no_error(qrcode.decode(qr))
+                t.eq(dec.text, msg)
+                t.eq(dec.mask, mask)
+                t.eq(dec.ec_level, lvl)
+            end
+        end
+    end)
+
+    t.it("supports multi-segment QR codes and ECI headers", function()
+        local qr = t.no_error(qrcode.encode(nil, {
+            ec_level = "M",
+            eci = 26,
+            segments = [
+                {mode = "numeric", data = "20261019"},
+                {mode = "alphanumeric", data = "-SEA-"},
+                {mode = "byte", data = "qr_lib"},
+            ],
+        }))
+        t.eq(qr.mode, "mixed")
+        local dec = t.no_error(qrcode.decode(qr))
+        t.eq(dec.text, "20261019-SEA-qr_lib")
+        t.eq(dec.eci, 26)
+        t.eq(len(dec.segments), 3)
+    end)
+
+    t.it("handles multi-block interleaved versions (Version 7 and Version 10 with Group 1 & Group 2)", function()
+        local long_text = string.rep("SeaVM-QRCode-Interleaved-Blocks-", 4)
+        local qr = t.no_error(qrcode.encode(long_text, {version = 10, ec_level = "Q"}))
+        t.eq(qr.version, 10)
+        t.eq(qr.size, 57)
+        local dec = t.no_error(qrcode.decode(qr))
+        t.eq(dec.version, 10)
+        t.eq(dec.ec_level, "Q")
+        t.eq(dec.text, long_text)
+    end)
+end)
+
+t.describe("Image formats, SVG, ASCII, rotación, and Finder Pattern detection", function()
+    t.it("round-trips PNG, BMP, PGM, PBM, SVG, and ASCII representations", function()
+        local msg = "https://github.com/dopsilva/sea"
+        local qr = t.no_error(qrcode.encode(msg, {ec_level = "M"}))
+
+        local png = qr:to_png({scale = 5, border = 4})
+        t.eq(t.no_error(qrcode.read(png)), msg)
+
+        local bmp = qr:to_bmp({scale = 4, border = 4})
+        t.eq(t.no_error(qrcode.read(bmp)), msg)
+
+        local pgm = qr:to_pgm({scale = 4, border = 3})
+        t.eq(t.no_error(qrcode.read(pgm)), msg)
+
+        local pbm = qr:to_pbm({scale = 3, border = 4})
+        t.eq(t.no_error(qrcode.read(pbm)), msg)
+
+        local svg = qr:to_svg({scale = 6, border = 4})
+        t.ok(string.contains(svg, "<svg"))
+        t.eq(t.no_error(qrcode.read(svg)), msg)
+
+        local asc = qr:to_ascii({border = 2})
+        t.eq(t.no_error(qrcode.read(asc)), msg)
+
+        local term = qr:to_terminal({border = 1})
+        t.gt(len(term), 20)
+    end)
+
+    t.it("writes and reads QR code files on disk (.png and .svg)", function()
+        local tmp_dir = t.no_error(fs.tempdir("sea_qrcode_"))
+        defer fs.remove(tmp_dir, {recursive = true, force = true})
+
+        local png_path = path.join(tmp_dir, "test_qr.png")
+        local svg_path = path.join(tmp_dir, "test_qr.svg")
+
+        t.no_error(qrcode.write("DISK-PNG-OK", png_path, {scale = 6}))
+        t.no_error(qrcode.write("DISK-SVG-OK", svg_path, {scale = 6}))
+
+        t.eq(t.no_error(qrcode.read(png_path)), "DISK-PNG-OK")
+        t.eq(t.no_error(qrcode.read(svg_path)), "DISK-SVG-OK")
+    end)
+
+    t.it("decodes inverted (white-on-black) and rotated (90°, 180°, 270°) QR codes", function()
+        local qr = t.no_error(qrcode.encode("INVERTED & ROTATED", {ec_level = "M"}))
+
+        -- Inverted PNG image
+        local inv_img = qr:to_image({scale = 5, border = 4, invert = true})
+        t.eq(t.no_error(qrcode.read(inv_img)), "INVERTED & ROTATED")
+
+        -- 90, 180, 270 degree matrix rotations
+        local rot90 = qrcode.decode_matrix(qr.matrix)
+        t.eq(rot90.rotation, 0)
+
+        local m = qr.matrix
+        local decode_mod = require("./decode")
+        for _, deg in [90, 180, 270] do
+            m = decode_mod.rotate_90_cw(m)
+            local res = t.no_error(qrcode.decode(m))
+            t.eq(res.text, "INVERTED & ROTATED")
+            t.eq(res.rotation, (360 - deg) % 360)
+        end
+    end)
+
+    t.it("detects an off-center QR code inside a larger noisy scene via 1:1:3:1:1 finder patterns", function()
+        local qr = t.no_error(qrcode.encode("FINDER-SCANNER-2026", {ec_level = "M"}))
+        local qr_img = qr:to_image({scale = 5, border = 4})
+
+        -- Place the QR code at offset (60, 45) inside a 320x260 canvas with a outer frame
+        local scene = qrcode.image.new(320, 260, 245)
+        for x = 5, 314 do
+            scene:set(x, 5, 20)
+            scene:set(x, 254, 20)
+        end
+        for y = 5, 254 do
+            scene:set(5, y, 20)
+            scene:set(314, y, 20)
+        end
+        local ox = 60
+        local oy = 45
+        for y = 0, qr_img.height - 1 do
+            for x = 0, qr_img.width - 1 do
+                scene:set(ox + x, oy + y, qr_img:get(x, y))
+            end
+        end
+
+        local res = t.no_error(qrcode.decode(scene))
+        t.eq(res.text, "FINDER-SCANNER-2026")
+        t.not_nil(res.bbox)
+    end)
+end)
+
+t.describe("Damaged QR Code recovery via Reed-Solomon", function()
+    t.it("recovers data when a 5x5 block of modules in the center is destroyed", function()
+        local qr = t.no_error(qrcode.encode("REED-SOLOMON SAVES THE DAY!", {ec_level = "H"}))
+        local damaged = qr.matrix:clone()
+        local mid = damaged.size // 2
+
+        -- Flip a 5x5 region of modules in the middle of the QR code
+        for dy = 0, 4 do
+            for dx = 0, 4 do
+                local x = mid - 2 + dx
+                local y = mid - 2 + dy
+                damaged:set(x, y, 1 - damaged:get(x, y))
+            end
+        end
+
+        local dec = t.no_error(qrcode.decode(damaged))
+        t.eq(dec.text, "REED-SOLOMON SAVES THE DAY!")
+        t.gt(dec.errors_corrected, 0)
+    end)
+end)
+
+t.describe("Structured payloads (PIX, Wi-Fi, vCard, TOTP)", function()
+    t.it("builds, encodes, decodes, and validates Brazilian PIX BR Code with CRC16-CCITT", function()
+        local brcode = t.no_error(qrcode.payload.pix({
+            key = "12345678909",
+            name = "LOJA SEA LTDA",
+            city = "CURITIBA",
+            amount = 89.90,
+            txid = "FAT2026",
+            description = "Assinatura Pro",
+        }))
+        local png = t.no_error(qrcode.to_png(brcode, {ec_level = "M", scale = 4}))
+        local dec = t.no_error(qrcode.decode(png))
+        t.eq(dec.payload.type, "pix")
+        t.ok(dec.payload.valid_crc)
+        t.eq(dec.payload.key, "12345678909")
+        t.eq(dec.payload.name, "LOJA SEA LTDA")
+        t.eq(dec.payload.city, "CURITIBA")
+        t.near(dec.payload.amount, 89.90, 0.001)
+        t.eq(dec.payload.txid, "FAT2026")
+        t.eq(dec.payload.description, "Assinatura Pro")
+    end)
+
+    t.it("builds and parses Wi-Fi and vCard 3.0 payloads", function()
+        local wifi_str = t.no_error(qrcode.payload.wifi({
+            ssid = "Sea_Lab;5GHz",
+            password = "pass:1234",
+            auth = "WPA",
+            hidden = true,
+        }))
+        local dec_wifi = t.no_error(qrcode.decode(t.no_error(qrcode.encode(wifi_str))))
+        t.eq(dec_wifi.payload.type, "wifi")
+        t.eq(dec_wifi.payload.ssid, "Sea_Lab;5GHz")
+        t.eq(dec_wifi.payload.password, "pass:1234")
+        t.eq(dec_wifi.payload.auth, "WPA")
+        t.ok(dec_wifi.payload.hidden)
+
+        local vc_str = t.no_error(qrcode.payload.vcard({
+            name = "Daniel Silva",
+            org = "Sea VM",
+            title = "Creator",
+            phone = "+5511999999999",
+            email = "daniel@sea.dev",
+            url = "https://github.com/dopsilva/sea",
+        }))
+        local dec_vc = t.no_error(qrcode.decode(t.no_error(qrcode.encode(vc_str))))
+        t.eq(dec_vc.payload.type, "vcard")
+        t.eq(dec_vc.payload.name, "Daniel Silva")
+        t.eq(dec_vc.payload.org, "Sea VM")
+        t.eq(dec_vc.payload.email, "daniel@sea.dev")
+    end)
+end)

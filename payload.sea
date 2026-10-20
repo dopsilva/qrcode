@@ -1,0 +1,372 @@
+-- payload.sea — Builders and parsers for standard QR Code payloads:
+-- PIX (BR Code EMV + CRC16-CCITT), Wi-Fi, vCard 3.0, TOTP (2FA), Mailto, SMS, Geo, URL.
+
+local M = {}
+
+-- Compute CRC16-CCITT (polynomial 0x1021, initial 0xFFFF) as 4-digit uppercase hex
+function M.crc16_ccitt(s)
+    local crc = 0xFFFF
+    local n = len(s)
+    for i = 1, n do
+        local b = string.byte(s, i)
+        crc = crc ~ (b << 8)
+        for _ = 0, 7 do
+            if (crc & 0x8000) ~= 0 then
+                crc = ((crc << 1) ~ 0x1021) & 0xFFFF
+            else
+                crc = (crc << 1) & 0xFFFF
+            end
+        end
+    end
+    return string.format("%04X", crc)
+end
+
+local function emv_tlv(id, val)
+    local v = tostring(val or "")
+    return string.format("%02s%02d%s", id, len(v), v)
+end
+
+-- Build a Brazilian PIX BR Code (EMV QRCPS-MPM) payload string
+-- opts: { key, name, city, amount, txid, description }
+function M.pix(opts)
+    opts = opts or {}
+    if not opts.key or len(tostring(opts.key)) == 0 then
+        return error("payload.pix: 'key' is required")
+    end
+    local key = tostring(opts.key)
+    local name = string.sub(tostring(opts.name or "RECEBEDOR"), 1, 25)
+    local city = string.sub(tostring(opts.city or "BRASILIA"), 1, 15)
+    local txid = tostring(opts.txid or "***")
+    if len(txid) == 0 then txid = "***" end
+
+    local gui = emv_tlv("00", "br.gov.bcb.pix")
+    local key_tlv = emv_tlv("01", key)
+    local desc_tlv = ""
+    if opts.description and len(tostring(opts.description)) > 0 then
+        desc_tlv = emv_tlv("02", tostring(opts.description))
+    end
+    local merchant_acct = emv_tlv("26", gui .. key_tlv .. desc_tlv)
+
+    local parts = [
+        emv_tlv("00", "01"), -- Payload Format Indicator
+        merchant_acct,
+        emv_tlv("52", "0000"), -- Merchant Category Code
+        emv_tlv("53", "986"),  -- Transaction Currency (BRL = 986)
+    ]
+
+    if opts.amount ~= nil then
+        local amt_str = ""
+        if type(opts.amount) == "number" or type(opts.amount) == "int" then
+            amt_str = string.format("%.2f", opts.amount)
+        else
+            amt_str = tostring(opts.amount)
+        end
+        parts[] = emv_tlv("54", amt_str)
+    end
+
+    parts[] = emv_tlv("58", "BR")
+    parts[] = emv_tlv("59", name)
+    parts[] = emv_tlv("60", city)
+    parts[] = emv_tlv("62", emv_tlv("05", txid))
+
+    local body = string.join(parts, "") .. "6304"
+    local crc = M.crc16_ccitt(body)
+    return body .. crc
+end
+
+local function parse_emv_map(s)
+    local out = [=]
+    local pos = 1
+    local n = len(s)
+    while pos + 3 <= n do
+        local tag = string.sub(s, pos, pos + 1)
+        local len_str = string.sub(s, pos + 2, pos + 3)
+        local vlen = tonumber(len_str)
+        if not vlen or vlen < 0 or pos + 3 + vlen > n then
+            return nil
+        end
+        local val = string.sub(s, pos + 4, pos + 3 + vlen)
+        out[tag] = val
+        pos += 4 + vlen
+    end
+    return out
+end
+
+-- Parse and validate a PIX BR Code string
+function M.parse_pix(brcode)
+    if type(brcode) ~= "string" or len(brcode) < 20 or not string.starts_with(brcode, "000201") then
+        return error("payload.parse_pix: invalid PIX BR Code header")
+    end
+    local fields = parse_emv_map(brcode)
+    if not fields then
+        return error("payload.parse_pix: malformed EMV TLV structure")
+    end
+
+    local valid_crc = false
+    if len(brcode) >= 8 and string.sub(brcode, len(brcode) - 7, len(brcode) - 4) == "6304" then
+        local without_crc = string.sub(brcode, 1, len(brcode) - 4)
+        local got_crc = string.upper(string.sub(brcode, len(brcode) - 3, len(brcode)))
+        valid_crc = (M.crc16_ccitt(without_crc) == got_crc)
+    end
+
+    local acct = fields["26"] and parse_emv_map(fields["26"]) or [=]
+    local add_data = fields["62"] and parse_emv_map(fields["62"]) or [=]
+
+    local amt = nil
+    if fields["54"] then
+        amt = tonumber(fields["54"]) or fields["54"]
+    end
+
+    return {
+        type = "pix",
+        key = acct["01"],
+        description = acct["02"],
+        gui = acct["00"],
+        name = fields["59"],
+        city = fields["60"],
+        country = fields["58"],
+        currency = fields["53"],
+        amount = amt,
+        txid = add_data["05"],
+        crc = fields["63"],
+        valid_crc = valid_crc,
+    }
+end
+
+local function escape_wifi(s)
+    local out = string.replace(tostring(s or ""), "\\", "\\\\")
+    out = string.replace(out, ";", "\\;")
+    out = string.replace(out, ",", "\\,")
+    out = string.replace(out, ":", "\\:")
+    return out
+end
+
+local function unescape_wifi(s)
+    local out = string.replace(s, "\\;", ";")
+    out = string.replace(out, "\\,", ",")
+    out = string.replace(out, "\\:", ":")
+    out = string.replace(out, "\\\\", "\\")
+    return out
+end
+
+-- Build a Wi-Fi configuration QR string: WIFI:T:WPA;S:MyNetwork;P:Secret;H:false;;
+function M.wifi(opts)
+    opts = opts or {}
+    if not opts.ssid or len(tostring(opts.ssid)) == 0 then
+        return error("payload.wifi: 'ssid' is required")
+    end
+    local auth = string.upper(opts.auth or (opts.password and "WPA" or "nopass"))
+    if auth == "NONE" or auth == "OPEN" then
+        auth = "nopass"
+    end
+    local ssid = escape_wifi(opts.ssid)
+    local pass = opts.password and escape_wifi(opts.password) or ""
+    local hidden = opts.hidden and "true" or "false"
+    local parts = [`WIFI:T:${auth};S:${ssid};`]
+    if len(pass) > 0 and auth ~= "nopass" then
+        parts[] = `P:${pass};`
+    end
+    if opts.hidden then
+        parts[] = `H:${hidden};`
+    end
+    parts[] = ";"
+    return string.join(parts, "")
+end
+
+-- Parse a WIFI:...;; string
+function M.parse_wifi(s)
+    if not string.starts_with(s, "WIFI:") then
+        return error("payload.parse_wifi: expected WIFI: prefix")
+    end
+    local body = string.sub(s, 6, len(s))
+    local ssid = nil
+    local password = nil
+    local auth = "nopass"
+    local hidden = false
+
+    local m_s = re.captures([[S:((?:\\.|[^;])*);]], body)
+    if m_s then ssid = unescape_wifi(m_s[1]) end
+    local m_t = re.captures([[T:([^;]*);]], body)
+    if m_t then auth = m_t[1] end
+    local m_p = re.captures([[P:((?:\\.|[^;])*);]], body)
+    if m_p then password = unescape_wifi(m_p[1]) end
+    local m_h = re.captures([[H:([^;]*);]], body)
+    if m_h then hidden = (string.lower(m_h[1]) == "true") end
+
+    return {
+        type = "wifi",
+        ssid = ssid,
+        password = password,
+        auth = auth,
+        hidden = hidden,
+    }
+end
+
+-- Build a vCard 3.0 contact string
+-- opts: { name, first_name, last_name, org, title, phone, email, url, address, note }
+function M.vcard(opts)
+    opts = opts or {}
+    local fn = opts.name
+    local first = opts.first_name or ""
+    local last = opts.last_name or ""
+    if not fn then
+        fn = string.trim(`${first} ${last}`)
+    end
+    if len(fn) == 0 then
+        return error("payload.vcard: 'name' (or 'first_name'/'last_name') is required")
+    end
+    if len(first) == 0 and len(last) == 0 then
+        local sp = string.find(fn, " ")
+        if sp then
+            first = string.sub(fn, 1, sp - 1)
+            last = string.sub(fn, sp + 1, len(fn))
+        else
+            first = fn
+        end
+    end
+
+    local lines = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        `N:${last};${first};;;`,
+        `FN:${fn}`,
+    ]
+    if opts.org then lines[] = `ORG:${opts.org}` end
+    if opts.title then lines[] = `TITLE:${opts.title}` end
+    if opts.phone then lines[] = `TEL;TYPE=CELL:${opts.phone}` end
+    if opts.email then lines[] = `EMAIL:${opts.email}` end
+    if opts.url then lines[] = `URL:${opts.url}` end
+    if opts.address then lines[] = `ADR:;;${opts.address};;;;` end
+    if opts.note then lines[] = `NOTE:${opts.note}` end
+    lines[] = "END:VCARD"
+    return string.join(lines, "\n")
+end
+
+-- Parse a vCard string
+function M.parse_vcard(s)
+    if not string.contains(s, "BEGIN:VCARD") then
+        return error("payload.parse_vcard: missing BEGIN:VCARD")
+    end
+    local out = {
+        type = "vcard",
+        name = nil,
+        org = nil,
+        title = nil,
+        phone = nil,
+        email = nil,
+        url = nil,
+        address = nil,
+        note = nil,
+    }
+    for _, raw_line in string.splitlines(s) do
+        local line = string.trim(raw_line)
+        local colon = string.find(line, ":")
+        if colon then
+            local key = string.upper(string.sub(line, 1, colon - 1))
+            local val = string.sub(line, colon + 1, len(line))
+            if key == "FN" then
+                out.name = val
+            elseif key == "ORG" then
+                out.org = val
+            elseif key == "TITLE" then
+                out.title = val
+            elseif string.starts_with(key, "TEL") then
+                out.phone = val
+            elseif string.starts_with(key, "EMAIL") then
+                out.email = val
+            elseif key == "URL" then
+                out.url = val
+            elseif string.starts_with(key, "ADR") then
+                out.address = string.trim(string.replace(val, ";", " "))
+            elseif key == "NOTE" then
+                out.note = val
+            end
+        end
+    end
+    return out
+end
+
+-- Build an otpauth://totp/ URI for 2FA apps (Google Authenticator, Authy, etc.)
+function M.totp(opts)
+    opts = opts or {}
+    if not opts.secret then
+        return error("payload.totp: 'secret' (Base32) is required")
+    end
+    local account = opts.account or opts.label or "user"
+    local issuer = opts.issuer or ""
+    local label = (len(issuer) > 0) and `${issuer}:${account}` or account
+    local digits = opts.digits or 6
+    local period = opts.period or 30
+    local alg = string.upper(opts.algorithm or "SHA1")
+    local q = [`secret=${opts.secret}`]
+    if len(issuer) > 0 then
+        q[] = `issuer=${encoding.url_encode(issuer)}`
+    end
+    q[] = `algorithm=${alg}`
+    q[] = `digits=${digits}`
+    q[] = `period=${period}`
+    return `otpauth://totp/${encoding.url_encode(label)}?` .. string.join(q, "&")
+end
+
+-- Build mailto:, smsto:, geo: URIs
+function M.mailto(opts)
+    opts = opts or {}
+    local to = opts.to or opts.email or ""
+    local params = []
+    if opts.subject then params[] = `subject=${encoding.url_encode(opts.subject)}` end
+    if opts.body then params[] = `body=${encoding.url_encode(opts.body)}` end
+    if len(params) > 0 then
+        return `mailto:${to}?` .. string.join(params, "&")
+    end
+    return `mailto:${to}`
+end
+
+function M.sms(opts)
+    opts = opts or {}
+    local num = opts.number or opts.phone or ""
+    local msg = opts.message or opts.body or ""
+    if len(msg) > 0 then
+        return `SMSTO:${num}:${msg}`
+    end
+    return `SMSTO:${num}`
+end
+
+function M.geo(opts)
+    opts = opts or {}
+    local lat = opts.lat or 0
+    local lon = opts.lon or 0
+    if opts.query then
+        return `geo:${lat},${lon}?q=${encoding.url_encode(opts.query)}`
+    end
+    return `geo:${lat},${lon}`
+end
+
+-- Auto-detect and parse structured QR Code payloads
+function M.parse(text)
+    if type(text) ~= "string" then
+        return {type = "text", text = tostring(text or "")}
+    end
+    if string.starts_with(text, "000201") then
+        local pix = M.parse_pix(text)
+        if not is_error(pix) then return pix end
+    elseif string.starts_with(text, "WIFI:") then
+        local wifi = M.parse_wifi(text)
+        if not is_error(wifi) then return wifi end
+    elseif string.contains(text, "BEGIN:VCARD") then
+        local vc = M.parse_vcard(text)
+        if not is_error(vc) then return vc end
+    elseif string.starts_with(text, "otpauth://") then
+        return {type = "totp", uri = text}
+    elseif string.starts_with(text, "http://") or string.starts_with(text, "https://") then
+        return {type = "url", url = text}
+    elseif string.starts_with(text, "mailto:") then
+        return {type = "mailto", uri = text}
+    elseif string.starts_with(string.upper(text), "SMSTO:") then
+        return {type = "sms", uri = text}
+    elseif string.starts_with(text, "geo:") then
+        return {type = "geo", uri = text}
+    end
+    return {type = "text", text = text}
+end
+
+return M

@@ -1,0 +1,474 @@
+-- encode.sea — QR Code encoder (Versions 1..40, EC levels L/M/Q/H, Numeric/Alphanumeric/Byte/Multi-segment).
+
+local tables = require("./tables")
+local rs = require("./reed_solomon")
+local matrix = require("./matrix")
+local image = require("./image")
+
+local M = {}
+
+local function new_bit_buffer()
+    local buf = {}
+    buf.bits = int_array(256)
+    function buf:push(val, nbits)
+        for i = nbits - 1, 0, -1 do
+            self.bits[] = (val >> i) & 1
+        end
+    end
+    function buf:len()
+        return len(self.bits)
+    end
+    function buf:to_bytes()
+        local n_bytes = (len(self.bits) + 7) // 8
+        local out = int_array(n_bytes)
+        for b = 0, n_bytes - 1 do
+            local v = 0
+            local base = b * 8
+            for i = 0, 7 do
+                local bit = (base + i < len(self.bits)) and self.bits[base + i] or 0
+                v = (v << 1) | bit
+            end
+            out[] = v
+        end
+        return out
+    end
+    return buf
+end
+
+-- Check if `s` consists solely of digits 0..9
+function M.is_numeric(s)
+    local n = len(s)
+    if n == 0 then return false end
+    for i = 1, n do
+        local b = string.byte(s, i)
+        if b < 48 or b > 57 then
+            return false
+        end
+    end
+    return true
+end
+
+-- Check if `s` consists solely of the 45 QR Alphanumeric characters
+function M.is_alphanumeric(s)
+    local n = len(s)
+    if n == 0 then return false end
+    local amap = tables.ALPHANUM_MAP
+    for i = 1, n do
+        local b = string.byte(s, i)
+        if amap[b] == nil then
+            return false
+        end
+    end
+    return true
+end
+
+-- Automatically detect the most compact QR encoding mode for `s`
+function M.detect_mode(s)
+    if len(s) == 0 then
+        return "byte"
+    elseif M.is_numeric(s) then
+        return "numeric"
+    elseif M.is_alphanumeric(s) then
+        return "alphanumeric"
+    else
+        return "byte"
+    end
+end
+
+local function mode_name_to_id(mode_name)
+    local m = string.lower(mode_name or "byte")
+    if m == "numeric" or m == "num" then
+        return tables.MODE_NUMERIC, "numeric"
+    elseif m == "alphanumeric" or m == "alphanum" or m == "alpha" then
+        return tables.MODE_ALPHANUMERIC, "alphanumeric"
+    elseif m == "byte" or m == "binary" or m == "utf8" then
+        return tables.MODE_BYTE, "byte"
+    end
+    return nil, nil
+end
+
+-- Compute the number of payload bits (excluding terminator/pad) required for a segment at `version`
+local function segment_bit_length(seg, version)
+    local mode_id = seg.mode_id
+    local n = len(seg.data)
+    local cc_bits = tables.char_count_bits(mode_id, version)
+    local data_bits = 0
+    if mode_id == tables.MODE_NUMERIC then
+        local full_triples = n // 3
+        local rem = n % 3
+        local rem_bits = 0
+        if rem == 2 then
+            rem_bits = 7
+        elseif rem == 1 then
+            rem_bits = 4
+        end
+        data_bits = full_triples * 10 + rem_bits
+    elseif mode_id == tables.MODE_ALPHANUMERIC then
+        local pairs_cnt = n // 2
+        local rem = n % 2
+        data_bits = pairs_cnt * 11 + rem * 6
+    else
+        data_bits = n * 8
+    end
+    return 4 + cc_bits + data_bits
+end
+
+-- Append a single segment (mode + char count + payload) to `bit_buf`
+local function write_segment(bit_buf, seg, version)
+    local mode_id = seg.mode_id
+    local s = seg.data
+    local n = len(s)
+    local cc_bits = tables.char_count_bits(mode_id, version)
+
+    bit_buf:push(mode_id, 4)
+    bit_buf:push(n, cc_bits)
+
+    if mode_id == tables.MODE_NUMERIC then
+        local i = 1
+        while i <= n do
+            local left = n - i + 1
+            if left >= 3 then
+                local d0 = string.byte(s, i) - 48
+                local d1 = string.byte(s, i + 1) - 48
+                local d2 = string.byte(s, i + 2) - 48
+                bit_buf:push(d0 * 100 + d1 * 10 + d2, 10)
+                i += 3
+            elseif left == 2 then
+                local d0 = string.byte(s, i) - 48
+                local d1 = string.byte(s, i + 1) - 48
+                bit_buf:push(d0 * 10 + d1, 7)
+                i += 2
+            else
+                local d0 = string.byte(s, i) - 48
+                bit_buf:push(d0, 4)
+                i += 1
+            end
+        end
+    elseif mode_id == tables.MODE_ALPHANUMERIC then
+        local amap = tables.ALPHANUM_MAP
+        local i = 1
+        while i <= n do
+            local left = n - i + 1
+            if left >= 2 then
+                local c0 = amap[string.byte(s, i)]
+                local c1 = amap[string.byte(s, i + 1)]
+                bit_buf:push(c0 * 45 + c1, 11)
+                i += 2
+            else
+                local c0 = amap[string.byte(s, i)]
+                bit_buf:push(c0, 6)
+                i += 1
+            end
+        end
+    else
+        for i = 1, n do
+            bit_buf:push(string.byte(s, i), 8)
+        end
+    end
+end
+
+-- Build data codewords for `segments` at `(version, ec_level)`
+local function build_data_codewords(segments, version, ec_level, eci_val)
+    local binfo = tables.block_info(version, ec_level)?
+    local capacity_bits = binfo.data_cw * 8
+    local buf = new_bit_buffer()
+
+    if eci_val ~= nil then
+        buf:push(tables.MODE_ECI, 4)
+        buf:push(eci_val & 0x7F, 8)
+    end
+
+    for _, seg in segments do
+        write_segment(buf, seg, version)
+    end
+
+    if buf:len() > capacity_bits then
+        return error(`encode: data (${buf:len()} bits) exceeds capacity (${capacity_bits} bits) for V${version}-${ec_level}`)
+    end
+
+    -- Terminator: up to 4 zero bits
+    local term_bits = math.min(4, capacity_bits - buf:len())
+    if term_bits > 0 then
+        buf:push(0, term_bits)
+    end
+
+    -- Pad to byte boundary with zero bits
+    local rem_mod8 = buf:len() % 8
+    if rem_mod8 ~= 0 then
+        buf:push(0, 8 - rem_mod8)
+    end
+
+    local data_bytes = buf:to_bytes()
+
+    -- Pad with alternating 0xEC and 0x11 codewords up to binfo.data_cw
+    local pad_idx = 0
+    while len(data_bytes) < binfo.data_cw do
+        data_bytes[] = (pad_idx % 2 == 0) and 0xEC or 0x11
+        pad_idx += 1
+    end
+
+    return {data_bytes = data_bytes, binfo = binfo}
+end
+
+-- Split data codewords into blocks, generate Reed-Solomon EC blocks, and interleave
+local function interleave_codewords(data_bytes, binfo)
+    local data_blocks = []
+    local ec_blocks = []
+    local pos = 0
+
+    for _ = 0, binfo.g1_blocks - 1 do
+        local blk = int_array(binfo.g1_data_cw)
+        for i = 0, binfo.g1_data_cw - 1 do
+            blk[] = data_bytes[pos + i]
+        end
+        pos += binfo.g1_data_cw
+        data_blocks[] = blk
+        ec_blocks[] = rs.encode(blk, binfo.ec_cw_per_block)
+    end
+
+    for _ = 0, binfo.g2_blocks - 1 do
+        local blk = int_array(binfo.g2_data_cw)
+        for i = 0, binfo.g2_data_cw - 1 do
+            blk[] = data_bytes[pos + i]
+        end
+        pos += binfo.g2_data_cw
+        data_blocks[] = blk
+        ec_blocks[] = rs.encode(blk, binfo.ec_cw_per_block)
+    end
+
+    local out = int_array(binfo.total_cw)
+    local max_data_len = (binfo.g2_blocks > 0) and binfo.g2_data_cw or binfo.g1_data_cw
+
+    for col = 0, max_data_len - 1 do
+        for b = 0, binfo.num_blocks - 1 do
+            local blk = data_blocks[b]
+            if col < len(blk) then
+                out[] = blk[col]
+            end
+        end
+    end
+
+    for col = 0, binfo.ec_cw_per_block - 1 do
+        for b = 0, binfo.num_blocks - 1 do
+            out[] = ec_blocks[b][col]
+        end
+    end
+
+    return out
+end
+
+local QRCodeMethods = {}
+
+function QRCodeMethods.get(self, x, y)
+    return self.matrix:get(x, y)
+end
+
+function QRCodeMethods.is_dark(self, x, y)
+    return self.matrix:get(x, y) ~= 0
+end
+
+function QRCodeMethods.to_image(self, opts)
+    return image.from_matrix(self.matrix, opts)
+end
+
+function QRCodeMethods.to_png(self, opts)
+    local img = image.from_matrix(self.matrix, opts)
+    return image.encode_png(img)
+end
+
+function QRCodeMethods.to_bmp(self, opts)
+    local img = image.from_matrix(self.matrix, opts)
+    return image.encode_bmp(img)
+end
+
+function QRCodeMethods.to_pgm(self, opts)
+    local img = image.from_matrix(self.matrix, opts)
+    return image.encode_pgm(img)
+end
+
+function QRCodeMethods.to_pbm(self, opts)
+    local img = image.from_matrix(self.matrix, opts)
+    return image.encode_pbm(img)
+end
+
+function QRCodeMethods.to_svg(self, opts)
+    return image.matrix_to_svg(self.matrix, opts)
+end
+
+function QRCodeMethods.to_ascii(self, opts)
+    return image.matrix_to_ascii(self.matrix, opts)
+end
+
+function QRCodeMethods.to_terminal(self, opts)
+    return image.matrix_to_terminal(self.matrix, opts)
+end
+
+function QRCodeMethods.save(self, file_path, opts)
+    local ext = string.lower(path.ext(file_path))
+    if ext == ".svg" then
+        return image.save_svg(self.matrix, file_path, opts)
+    elseif ext == ".txt" or ext == ".asc" then
+        return fs.write(file_path, self:to_ascii(opts) .. "\n")
+    else
+        local img = self:to_image(opts)
+        return img:save(file_path)
+    end
+end
+
+-- encode.encode(text [, opts]) → QRCode|error
+-- opts:
+--   ec_level    : "L" | "M" | "Q" | "H" (default "M")
+--   version     : 1..40 (default: auto-select smallest fitting version)
+--   min_version : 1..40 (default 1)
+--   max_version : 1..40 (default 40)
+--   mode        : "numeric" | "alphanumeric" | "byte" (default: auto-detected)
+--   mask        : 0..7 (default: auto-select mask with lowest ISO 18004 penalty)
+--   eci         : optional ECI assignment number (e.g. 26 for UTF-8)
+--   segments    : optional array of { mode = "...", data = "..." } for multi-segment QR
+function M.encode(text, opts)
+    opts = opts or {}
+    if text == nil and opts.segments == nil then
+        return error("qrcode.encode: expected text string or opts.segments")
+    end
+    local str = tostring(text or "")
+    local ec_level = string.upper(opts.ec_level or opts.ec or "M")
+    if tables.EC_FORMAT_BITS[ec_level] == nil then
+        return error(`qrcode.encode: invalid ec_level '${ec_level}' (expected L, M, Q, or H)`)
+    end
+
+    local segments = []
+    local primary_mode = nil
+    if opts.segments then
+        for _, raw_seg in opts.segments do
+            local s_data = tostring(raw_seg.data or "")
+            local m_str = raw_seg.mode or M.detect_mode(s_data)
+            local m_id, m_norm = mode_name_to_id(m_str)
+            if not m_id then
+                return error(`qrcode.encode: invalid segment mode '${m_str}'`)
+            end
+            if m_id == tables.MODE_NUMERIC and len(s_data) > 0 and not M.is_numeric(s_data) then
+                return error("qrcode.encode: numeric segment contains non-digit characters")
+            elseif m_id == tables.MODE_ALPHANUMERIC and len(s_data) > 0 and not M.is_alphanumeric(s_data) then
+                return error("qrcode.encode: alphanumeric segment contains unsupported characters")
+            end
+            segments[] = {mode_id = m_id, mode = m_norm, data = s_data}
+            if not primary_mode then
+                primary_mode = m_norm
+            elseif primary_mode ~= m_norm then
+                primary_mode = "mixed"
+            end
+        end
+    else
+        local m_str = opts.mode or M.detect_mode(str)
+        local m_id, m_norm = mode_name_to_id(m_str)
+        if not m_id then
+            return error(`qrcode.encode: invalid mode '${m_str}' (expected numeric, alphanumeric, or byte)`)
+        end
+        if m_id == tables.MODE_NUMERIC and len(str) > 0 and not M.is_numeric(str) then
+            return error("qrcode.encode: numeric mode requested but text contains non-digits")
+        elseif m_id == tables.MODE_ALPHANUMERIC and len(str) > 0 and not M.is_alphanumeric(str) then
+            return error("qrcode.encode: alphanumeric mode requested but text contains invalid chars")
+        end
+        segments[] = {mode_id = m_id, mode = m_norm, data = str}
+        primary_mode = m_norm
+    end
+
+    local eci_bits = (opts.eci ~= nil) and 12 or 0
+
+    -- Select version
+    local version = opts.version
+    if version ~= nil then
+        if version < 1 or version > 40 then
+            return error(`qrcode.encode: version must be in 1..40 (got ${version})`)
+        end
+        local binfo = tables.block_info(version, ec_level)?
+        local needed = eci_bits
+        for _, seg in segments do
+            needed += segment_bit_length(seg, version)
+        end
+        if needed > binfo.data_cw * 8 then
+            return error(`qrcode.encode: payload (${needed} bits) does not fit in version ${version}-${ec_level} (capacity ${binfo.data_cw * 8} bits)`)
+        end
+    else
+        local min_v = opts.min_version or 1
+        local max_v = opts.max_version or 40
+        for v = min_v, max_v do
+            local binfo = tables.block_info(v, ec_level)?
+            local needed = eci_bits
+            for _, seg in segments do
+                needed += segment_bit_length(seg, v)
+            end
+            if needed <= binfo.data_cw * 8 then
+                version = v
+                break
+            end
+        end
+        if version == nil then
+            return error(`qrcode.encode: payload too large for QR Code versions ${min_v}..${max_v} at EC level ${ec_level}`)
+        end
+    end
+
+    local built = build_data_codewords(segments, version, ec_level, opts.eci)?
+    local data_bytes = built.data_bytes
+    local binfo = built.binfo
+    local all_codewords = interleave_codewords(data_bytes, binfo)
+
+    local size = tables.version_size(version)
+    local base_mat = matrix.new(size, version)
+    matrix.setup_function_patterns(base_mat)
+    matrix.place_codewords(base_mat, all_codewords)
+
+    local chosen_mask = opts.mask
+    local final_mat = nil
+    local best_penalty = 0
+
+    if chosen_mask ~= nil then
+        if chosen_mask < 0 or chosen_mask > 7 then
+            return error(`qrcode.encode: mask must be in 0..7 (got ${chosen_mask})`)
+        end
+        final_mat = base_mat:clone()
+        matrix.apply_mask(final_mat, chosen_mask)
+        matrix.write_format_info(final_mat, ec_level, chosen_mask)
+        if version >= 7 then
+            matrix.write_version_info(final_mat, version)
+        end
+        best_penalty = matrix.penalty_score(final_mat)
+    else
+        best_penalty = 1000000000
+        for m = 0, 7 do
+            local cand = base_mat:clone()
+            matrix.apply_mask(cand, m)
+            matrix.write_format_info(cand, ec_level, m)
+            if version >= 7 then
+                matrix.write_version_info(cand, version)
+            end
+            local pen = matrix.penalty_score(cand)
+            if final_mat == nil or pen < best_penalty then
+                best_penalty = pen
+                chosen_mask = m
+                final_mat = cand
+            end
+        end
+    end
+
+    local qr = {}
+    qr.text = str
+    qr.version = version
+    qr.ec_level = ec_level
+    qr.mask = chosen_mask
+    qr.mode = primary_mode
+    qr.size = size
+    qr.matrix = final_mat
+    qr.modules = final_mat.modules
+    qr.is_func = final_mat.is_func
+    qr.data_codewords = len(data_bytes)
+    qr.total_codewords = len(all_codewords)
+    qr.penalty = best_penalty
+
+    for k, fn in QRCodeMethods do
+        qr[k] = fn
+    end
+    return qr
+end
+
+return M

@@ -1,0 +1,64 @@
+-- examples/demo.sea — Demonstração completa da biblioteca Sea QRCode (escrita, leitura, PIX, Wi-Fi e Reed-Solomon).
+
+local qrcode = require("../qrcode")
+
+print("==========================================================")
+print("  Sea QRCode — Demonstração de Leitura & Escrita (ISO 18004)")
+print("==========================================================\n")
+
+-- 1. Gerar QR Code de URL e exibir no terminal em blocos Unicode
+local url = "https://github.com/dopsilva/sea"
+local qr_url = qrcode.encode(url, {ec_level = "M"})?
+printf("1. QR Code gerado para URL: %s\n", url)
+printf("   Versão: V%d (%dx%d) | EC: %s | Máscara: %d | Modo: %s\n\n",
+    qr_url.version, qr_url.size, qr_url.size, qr_url.ec_level, qr_url.mask, qr_url.mode)
+print(qr_url:to_terminal({border = 2}))
+print()
+
+qr_url:save("examples/sea_url.png", {scale = 6, border = 4})?
+local lido_url = qrcode.read("examples/sea_url.png")?
+printf("   -> Lido de examples/sea_url.png: %s\n\n", lido_url)
+
+-- 2. Gerar e decodificar QR Code PIX (BR Code EMV + CRC16-CCITT)
+local pix_str = qrcode.payload.pix({
+    key = "daniel@sea.dev",
+    name = "DANIEL SILVA",
+    city = "SAO PAULO",
+    amount = 149.90,
+    txid = "SEA2026",
+    description = "Licenca Sea Pro",
+})?
+qrcode.write(pix_str, "examples/pix.png", {ec_level = "M", scale = 5})?
+local res_pix = qrcode.decode("examples/pix.png")?
+printf("2. QR Code PIX salvo e decodificado de examples/pix.png:\n")
+printf("   Payload BR Code : %s\n", res_pix.text)
+printf("   Chave PIX       : %s\n", res_pix.payload.key)
+printf("   Recebedor       : %s (%s)\n", res_pix.payload.name, res_pix.payload.city)
+printf("   Valor           : R$ %.2f | TXID: %s | CRC16 válido: %s\n\n",
+    res_pix.payload.amount, res_pix.payload.txid, tostring(res_pix.payload.valid_crc))
+
+-- 3. Gerar e decodificar QR Code Wi-Fi em SVG
+local wifi_str = qrcode.payload.wifi({
+    ssid = "SeaVM_5G",
+    password = "sea-fast-vm-2026",
+    auth = "WPA",
+})?
+qrcode.write(wifi_str, "examples/wifi.svg", {ec_level = "Q", scale = 6})?
+local res_wifi = qrcode.decode("examples/wifi.svg")?
+printf("3. QR Code Wi-Fi salvo e lido de examples/wifi.svg:\n")
+printf("   Rede (SSID): %s | Autenticação: %s | Senha: %s\n\n",
+    res_wifi.payload.ssid, res_wifi.payload.auth, res_wifi.payload.password)
+
+-- 4. Recuperação de QR Code danificado via corretor Reed-Solomon
+local qr_h = qrcode.encode("SEA VM REED-SOLOMON RECOVERY!", {ec_level = "H"})?
+local damaged = qr_h.matrix:clone()
+local mid = damaged.size // 2
+for dy = 0, 4 do
+    for dx = 0, 4 do
+        damaged:set(mid - 2 + dx, mid - 2 + dy, 1 - damaged:get(mid - 2 + dx, mid - 2 + dy))
+    end
+end
+local rec = qrcode.decode(damaged)?
+printf("4. Recuperação Reed-Solomon (bloco central 5x5 corrompido):\n")
+printf("   Texto recuperado : %s\n", rec.text)
+printf("   Bytes corrigidos : %d\n", rec.errors_corrected)

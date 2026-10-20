@@ -325,3 +325,33 @@ t.describe("Kanji mode (Shift JIS, ISO/IEC 18004 7.4.6)", function()
         t.is_error(qrcode.encode("x", {segments = [{mode = "kanji", data = "€"}]}))
     end)
 end)
+
+t.describe("Detector under perspective", function()
+    t.it("reads a version 10 code photographed at an angle", function()
+        local text = string.rep("perspective ", 20)
+        local qr = t.no_error(qrcode.encode(text, {ec_level = "M"}))
+        t.ok(qr.version >= 7)
+        local src = qr:to_image({scale = 4, border = 4})
+        -- a projective warp (each output pixel looks back into the source)
+        local W = src.width + 80
+        local H = src.height + 80
+        local out = qrcode.image.new(W, H, 255)
+        local sw = src.width
+        local sh = src.height
+        for y = 0, H - 1 do
+            for x = 0, W - 1 do
+                -- inverse map: the output quad (0.10W, 0.06H) (0.94W, 0) (W, H) (0, 0.90H) back to the source
+                local u = x / W
+                local v = y / H
+                local den = 1.0 + 0.18 * u - 0.12 * v
+                local su = (u * 1.18 - 0.08 + 0.06 * v) / den
+                local sv = (v * 0.98 - 0.05 + 0.04 * u) / den
+                local px = math.floor(su * sw)
+                local py = math.floor(sv * sh)
+                out:set(x, y, src:get(px, py))
+            end
+        end
+        local res = t.no_error(qrcode.decode(out))
+        t.eq(res.text, text)
+    end)
+end)

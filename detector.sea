@@ -349,6 +349,13 @@ function M.select_finder_triad(clusters)
 
     local best_triad = nil
     local best_score = 1000000000.0
+    -- real finder patterns are confirmed on many scan lines: a triad with a
+    -- weakly confirmed member is penalised (perspective bends the geometry, so
+    -- the shape alone can prefer a false pattern from the data area)
+    local max_count = 1
+    for i = 0, n - 1 do
+        if (clusters[i].count or 1) > max_count then max_count = clusters[i].count or 1 end
+    end
 
     for i = 0, n - 3 do
         for j = i + 1, n - 2 do
@@ -402,7 +409,8 @@ function M.select_finder_triad(clusters)
                 local hyp_diff = math.abs(hyp - expected_hyp) / expected_hyp
 
                 if side_diff < 0.25 and hyp_diff < 0.25 then
-                    local score = side_diff + hyp_diff - (p0.count + p1.count + p2.count) * 0.001
+                    local weakest = math.min(p0.count or 1, p1.count or 1, p2.count or 1)
+                    local score = side_diff + hyp_diff + 0.5 * (1.0 - weakest / max_count)
                     if score < best_score then
                         best_score = score
                         -- Use cross product (b - tl) x (c - tl) to order TR and BL
@@ -420,92 +428,253 @@ function M.select_finder_triad(clusters)
 end
 
 -- Search for the bottom-right 1:1:1 alignment pattern near (est_x, est_y)
-local function find_alignment_pattern(bits, w, h, est_x, est_y, mod_size)
-    local radius = math.max(4, math.floor(mod_size * 3.5))
+-- the 5x5 alignment pattern (dark center, light ring, dark ring) nearest to
+-- (est_x, est_y) within `radius` pixels. `axes` = [ux, uy, vx, vy] are one
+-- module along the code's x and y there (the code may be rotated); without
+-- them the image's axes and mod_size are used. Returns x, y, found.
+local function find_alignment_pattern(bits, w, h, est_x, est_y, mod_size, radius, axes)
+    local ms = mod_size
+    radius = radius or math.max(4, math.floor(ms * 3.5))
+    local ux = ms
+    local uy = 0.0
+    local vx = 0.0
+    local vy = ms
+    if axes ~= nil then
+        ux = axes[0]
+        uy = axes[1]
+        vx = axes[2]
+        vy = axes[3]
+    end
+    local function dark(x, y)
+        local ix = math.floor(x)
+        local iy = math.floor(y)
+        if ix < 0 or iy < 0 or ix >= w or iy >= h then return false end
+        return bits[iy * w + ix] == 1
+    end
+    -- in module steps along the code's axes: light 1 module away, dark 2 away,
+    -- in 8 directions (16 checks)
+    local dirs = [ [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1] ]
+    local function ring_score(cx, cy)
+        local good = 0
+        for _, dv in dirs do
+            local px = dv[0] * ux + dv[1] * vx
+            local py = dv[0] * uy + dv[1] * vy
+            if not dark(cx + px, cy + py) then good += 1 end
+            if dark(cx + px * 2.0, cy + py * 2.0) then good += 1 end
+        end
+        return good
+    end
     local cx0 = math.floor(est_x)
     local cy0 = math.floor(est_y)
     local best_x = est_x
     local best_y = est_y
-    local best_err = 1000000.0
-    local found = false
-
-    for dy_i = 0, radius * 2 do
-        local y = cy0 - radius + dy_i
-        if y < 2 or y >= h - 2 then continue end
-        for dx_i = 0, radius * 2 do
-            local x = cx0 - radius + dx_i
-            if x < 2 or x >= w - 2 then continue end
-            if bits[y * w + x] == 1 then
-                -- Check dark center (s1), surrounded by light ring (s0, s2) horizontally and vertically
+    local best = -1.0
+    local step = math.max(1, math.floor(ms / 3))
+    for y = cy0 - radius, cy0 + radius, step do
+        for x = cx0 - radius, cx0 + radius, step do
+            if dark(x, y) then
+                -- the dark center's extent, to put (x, y) at its middle
                 local lx = 0
-                while x - 1 - lx >= 0 and bits[y * w + (x - 1 - lx)] == 1 and lx <= mod_size * 2 do lx += 1 end
+                while lx <= ms * 1.5 and dark(x - 1 - lx, y) do lx += 1 end
                 local rx = 0
-                while x + 1 + rx < w and bits[y * w + (x + 1 + rx)] == 1 and rx <= mod_size * 2 do rx += 1 end
-                local cw = 1 + lx + rx
-
+                while rx <= ms * 1.5 and dark(x + 1 + rx, y) do rx += 1 end
                 local uy = 0
-                while y - 1 - uy >= 0 and bits[(y - 1 - uy) * w + x] == 1 and uy <= mod_size * 2 do uy += 1 end
-                local by = 0
-                while y + 1 + by < h and bits[(y + 1 + by) * w + x] == 1 and by <= mod_size * 2 do by += 1 end
-                local ch = 1 + uy + by
-
-                if cw <= mod_size * 2.2 and ch <= mod_size * 2.2 then
-                    -- Verify white ring immediately outside dark center
-                    local x_left = x - lx - 1
-                    local x_right = x + rx + 1
-                    local y_up = y - uy - 1
-                    local y_down = y + by + 1
-                    if x_left >= 0 and x_right < w and y_up >= 0 and y_down < h then
-                        if bits[y * w + x_left] == 0 and bits[y * w + x_right] == 0 and
-                            bits[y_up * w + x] == 0 and bits[y_down * w + x] == 0 then
-                            local mid_x = x + (rx - lx) / 2.0
-                            local mid_y = y + (by - uy) / 2.0
-                            local err = math.abs(cw - mod_size) + math.abs(ch - mod_size) +
-                                math.sqrt((mid_x - est_x) ^ 2 + (mid_y - est_y) ^ 2) * 0.25
-                            if err < best_err then
-                                best_err = err
-                                best_x = mid_x
-                                best_y = mid_y
-                                found = true
-                            end
+                while uy <= ms * 1.5 and dark(x, y - 1 - uy) do uy += 1 end
+                local dy = 0
+                while dy <= ms * 1.5 and dark(x, y + 1 + dy) do dy += 1 end
+                local cw = 1 + lx + rx
+                local ch = 1 + uy + dy
+                if cw <= ms * 1.6 and ch <= ms * 1.6 and cw >= ms * 0.4 and ch >= ms * 0.4 then
+                    local mx = x + (rx - lx) / 2.0
+                    local my = y + (dy - uy) / 2.0
+                    local score = ring_score(mx, my)
+                    if score >= 14 then
+                        -- prefer the full ring, then the nearest
+                        local dist = math.sqrt((mx - est_x) ^ 2 + (my - est_y) ^ 2)
+                        local value = score * 1000.0 - dist
+                        if value > best then
+                            best = value
+                            best_x = mx
+                            best_y = my
                         end
                     end
                 end
             end
         end
     end
-
-    if found then
-        return best_x, best_y, true
-    end
+    if best >= 0 then return best_x, best_y, true end
     return est_x, est_y, false
 end
 
--- Sample a `size x size` QR Matrix using 4 control points (TL, TR, BL, and BR/Alignment)
--- Uses bilinear / perspective interpolation on normalized coordinates in [0, 1]^2
+-- ---- perspective (projective) transforms ----
+-- A transform is [a11, a12, a13, a21, a22, a23, a31, a32, a33] mapping (x, y)
+-- to ((a11 x + a21 y + a31) / w, (a12 x + a22 y + a32) / w), w = a13 x + a23 y + a33
+-- (ZXing's PerspectiveTransform layout).
+
+local function transform_point(t, x, y)
+    local den = t[2] * x + t[5] * y + t[8]
+    return (t[0] * x + t[3] * y + t[6]) / den, (t[1] * x + t[4] * y + t[7]) / den
+end
+
+local function square_to_quad(x0, y0, x1, y1, x2, y2, x3, y3)
+    local dx3 = x0 - x1 + x2 - x3
+    local dy3 = y0 - y1 + y2 - y3
+    if dx3 == 0.0 and dy3 == 0.0 then
+        return [x1 - x0, y1 - y0, 0.0, x2 - x1, y2 - y1, 0.0, x0, y0, 1.0]
+    end
+    local dx1 = x1 - x2
+    local dx2 = x3 - x2
+    local dy1 = y1 - y2
+    local dy2 = y3 - y2
+    local den = dx1 * dy2 - dx2 * dy1
+    local a13 = (dx3 * dy2 - dx2 * dy3) / den
+    local a23 = (dx1 * dy3 - dx3 * dy1) / den
+    return [x1 - x0 + a13 * x1, y1 - y0 + a13 * y1, a13,
+        x3 - x0 + a23 * x3, y3 - y0 + a23 * y3, a23, x0, y0, 1.0]
+end
+
+local function adjoint(t)
+    return [t[4] * t[8] - t[5] * t[7], t[2] * t[7] - t[1] * t[8], t[1] * t[5] - t[2] * t[4],
+        t[5] * t[6] - t[3] * t[8], t[0] * t[8] - t[2] * t[6], t[2] * t[3] - t[0] * t[5],
+        t[3] * t[7] - t[4] * t[6], t[1] * t[6] - t[0] * t[7], t[0] * t[4] - t[1] * t[3]]
+end
+
+-- a then b: (a × b)(p) = a(b(p))
+local function times(a, b)
+    return [a[0] * b[0] + a[3] * b[1] + a[6] * b[2], a[1] * b[0] + a[4] * b[1] + a[7] * b[2],
+        a[2] * b[0] + a[5] * b[1] + a[8] * b[2], a[0] * b[3] + a[3] * b[4] + a[6] * b[5],
+        a[1] * b[3] + a[4] * b[4] + a[7] * b[5], a[2] * b[3] + a[5] * b[4] + a[8] * b[5],
+        a[0] * b[6] + a[3] * b[7] + a[6] * b[8], a[1] * b[6] + a[4] * b[7] + a[7] * b[8],
+        a[2] * b[6] + a[5] * b[7] + a[8] * b[8]]
+end
+
+-- the transform taking four points (module space) to four points (image)
+local function quad_to_quad(src, dst)
+    local q2s = adjoint(square_to_quad(src[0][0], src[0][1], src[1][0], src[1][1], src[2][0], src[2][1], src[3][0], src[3][1]))
+    local s2q = square_to_quad(dst[0][0], dst[0][1], dst[1][0], dst[1][1], dst[2][0], dst[2][1], dst[3][0], dst[3][1])
+    return times(s2q, q2s)
+end
+
+-- least squares transform for n >= 4 pairs (src module points -> dst image
+-- points), a33 = 1: the 8x8 normal equations, solved by Gaussian elimination
+local function fit_transform(src, dst)
+    local ata = []
+    for _ = 0, 63 do ata[] = 0.0 end
+    local atb = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    local function add_row(r, b)
+        for i = 0, 7 do
+            if r[i] ~= 0.0 then
+                for j = 0, 7 do ata[i * 8 + j] += r[i] * r[j] end
+                atb[i] += r[i] * b
+            end
+        end
+    end
+    for k, s in src do
+        local x = s[0]
+        local y = s[1]
+        local u = dst[k][0]
+        local v = dst[k][1]
+        -- unknowns: h11 h12 h13 h21 h22 h23 h31 h32 for u = (h11 x + h12 y + h13) / (h31 x + h32 y + 1)
+        add_row([x, y, 1.0, 0.0, 0.0, 0.0, -x * u, -y * u], u)
+        add_row([0.0, 0.0, 0.0, x, y, 1.0, -x * v, -y * v], v)
+    end
+    -- Gaussian elimination with partial pivoting
+    for c = 0, 7 do
+        local p = c
+        for r = c + 1, 7 do
+            if math.abs(ata[r * 8 + c]) > math.abs(ata[p * 8 + c]) then p = r end
+        end
+        if math.abs(ata[p * 8 + c]) < 1e-12 then return nil end
+        if p ~= c then
+            for j = 0, 7 do
+                local tmp = ata[c * 8 + j]
+                ata[c * 8 + j] = ata[p * 8 + j]
+                ata[p * 8 + j] = tmp
+            end
+            local tb = atb[c]
+            atb[c] = atb[p]
+            atb[p] = tb
+        end
+        for r = c + 1, 7 do
+            local f = ata[r * 8 + c] / ata[c * 8 + c]
+            if f ~= 0.0 then
+                for j = c, 7 do ata[r * 8 + j] -= f * ata[c * 8 + j] end
+                atb[r] -= f * atb[c]
+            end
+        end
+    end
+    local h = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for c = 7, 0, -1 do
+        local s = atb[c]
+        for j = c + 1, 7 do s -= ata[c * 8 + j] * h[j] end
+        h[c] = s / ata[c * 8 + c]
+    end
+    -- to the ZXing layout: u = (a11 x + a21 y + a31) / w
+    return [h[0], h[3], h[6], h[1], h[4], h[7], h[2], h[5], 1.0]
+end
+
+-- Sample a `size x size` QR Matrix through a perspective transform from module
+-- space to the image: the three finder centers and the bottom-right alignment
+-- pattern (or the parallelogram's fourth corner) give the first transform; in
+-- larger versions every alignment pattern found near where it predicts refines
+-- it by least squares
 local function sample_grid_from_triad(bits, w, h, triad, size)
     local tl = triad.tl
     local tr = triad.tr
     local bl = triad.bl
-    local span = size - 7.0 -- distance in modules between finder centers (3.5 to size - 3.5)
+    local ms = triad.mod_size
 
-    -- Default affine parallelogram fourth corner for finder space (size - 3.5, size - 3.5)
-    local br_x = tr.x + bl.x - tl.x
-    local br_y = tr.y + bl.y - tl.y
+    local src = [ [3.5, 3.5], [size - 3.5, 3.5], [size - 3.5, size - 3.5], [3.5, size - 3.5] ]
+    local dst = [ [tl.x, tl.y], [tr.x, tr.y], [tr.x + bl.x - tl.x, tr.y + bl.y - tl.y], [bl.x, bl.y] ]
+    local t = quad_to_quad(src, dst)
 
     if size >= 25 then
-        -- Version >= 2 has an alignment pattern at (size - 6.5, size - 6.5)
-        -- In finder-center span units, that is ratio = (size - 10) / (size - 7)
-        local ratio = (size - 10.0) / span
-        local est_ax = tl.x + ratio * (tr.x - tl.x) + ratio * (bl.x - tl.x)
-        local est_ay = tl.y + ratio * (tr.y - tl.y) + ratio * (bl.y - tl.y)
-        local ax, ay, ok = find_alignment_pattern(bits, w, h, est_ax, est_ay, triad.mod_size)
+        -- the bottom-right alignment pattern: where the parallelogram puts it,
+        -- searched in growing rings (perspective moves it)
+        local ex, ey = transform_point(t, size - 6.5, size - 6.5)
+        local span = size - 7.0
+        local axes = [(tr.x - tl.x) / span, (tr.y - tl.y) / span, (bl.x - tl.x) / span, (bl.y - tl.y) / span]
+        local ax, ay, ok = find_alignment_pattern(bits, w, h, ex, ey, ms, math.floor(ms * 4), axes)
+        if not ok then ax, ay, ok = find_alignment_pattern(bits, w, h, ex, ey, ms, math.floor(ms * 12), axes) end
         if ok then
-            -- Extrapolate from alignment center at ratio back to (1, 1) at (size - 3.5, size - 3.5)
-            local corr_x = (ax - est_ax) / (ratio * ratio)
-            local corr_y = (ay - est_ay) / (ratio * ratio)
-            br_x += corr_x
-            br_y += corr_y
+            src[2] = [size - 6.5, size - 6.5]
+            dst[2] = [ax, ay]
+            t = quad_to_quad(src, dst)
+        end
+
+        -- every other alignment pattern (versions 7 and up), twice
+        local version = (size - 17) // 4
+        local apos = tables.ALIGNMENT_POS[version]
+        local k = len(apos)
+        if k > 2 then
+            for _ = 1, 2 do
+                local fsrc = [ [3.5, 3.5], [size - 3.5, 3.5], [3.5, size - 3.5] ]
+                local fdst = [ [tl.x, tl.y], [tr.x, tr.y], [bl.x, bl.y] ]
+                for i = 0, k - 1 do
+                    for j = 0, k - 1 do
+                        local corner = (i == 0 and j == 0) or (i == 0 and j == k - 1) or (i == k - 1 and j == 0)
+                        if not corner then
+                            local mx = apos[j] + 0.5
+                            local my = apos[i] + 0.5
+                            local px, py = transform_point(t, mx, my)
+                            -- the local module size, from the transform
+                            local qx, qy = transform_point(t, mx + 1.0, my)
+                            local rx, ry = transform_point(t, mx, my + 1.0)
+                            local lms = math.sqrt((qx - px) ^ 2 + (qy - py) ^ 2)
+                            local fx, fy, found = find_alignment_pattern(bits, w, h, px, py, lms, nil,
+                                [qx - px, qy - py, rx - px, ry - py])
+                            if found and math.sqrt((fx - px) ^ 2 + (fy - py) ^ 2) < lms * 2.5 then
+                                fsrc[] = [mx, my]
+                                fdst[] = [fx, fy]
+                            end
+                        end
+                    end
+                end
+                if len(fsrc) >= 5 then
+                    local refined = fit_transform(fsrc, fdst)
+                    if refined ~= nil then t = refined end
+                end
+            end
         end
     end
 
@@ -522,16 +691,7 @@ local function sample_grid_from_triad(bits, w, h, triad, size)
         for mx = 0, size - 1 do
             local votes = 0
             for _, pt in sample_pts do
-                local u = (mx + 0.5 + pt[0] - 3.5) / span
-                local v = (my + 0.5 + pt[1] - 3.5) / span
-                local px = (1.0 - u) * (1.0 - v) * tl.x +
-                    u * (1.0 - v) * tr.x +
-                    (1.0 - u) * v * bl.x +
-                    u * v * br_x
-                local py = (1.0 - u) * (1.0 - v) * tl.y +
-                    u * (1.0 - v) * tr.y +
-                    (1.0 - u) * v * bl.y +
-                    u * v * br_y
+                local px, py = transform_point(t, mx + 0.5 + pt[0], my + 0.5 + pt[1])
                 local ix = math.floor(px)
                 local iy = math.floor(py)
                 if ix >= 0 and ix < w and iy >= 0 and iy < h then

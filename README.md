@@ -20,7 +20,8 @@ Biblioteca completa de **leitura e escrita de QR Codes (ISO/IEC 18004)** escrita
   - **Terminal Unicode** (`▀`, `▄`, `█`, ` `) e **ASCII Art**
 - **Detector de imagem robusto**:
   - Binarização global de **Otsu**, binarização **adaptativa** via imagem integral e detecção automática de QR Codes **invertidos** (claro sobre fundo escuro) e **rotacionados** (`0°`, `90°`, `180°`, `270°`)
-  - Scanner de **Finder Patterns (`1:1:3:1:1`)** horizontal, vertical e diagonal + localização de **Alignment Pattern (`1:1:1`)** e amostragem de grade com correção de perspectiva/homografia
+  - Scanner de **Finder Patterns (`1:1:3:1:1`)** horizontal, vertical e diagonal (o trio é escolhido pela geometria e pelo número de confirmações de cada padrão)
+  - **Homografia** (transformação projetiva) dos três finders e do Alignment Pattern 5×5 do canto; a partir da versão 7, **todos os Alignment Patterns** encontrados refinam a transformação por mínimos quadrados — QR Codes grandes fotografados inclinados são lidos
 - **Payloads estruturados prontos para uso (`qrcode.payload`)**:
   - **PIX (BR Code EMV® QRCPS-MPM + CRC16-CCITT `0x1021`)**: geração e parser/validador de chaves, valores, TXID e CRC16
   - **Wi-Fi** (`WIFI:T:WPA;S:...;P:...;;`)
@@ -34,7 +35,7 @@ Biblioteca completa de **leitura e escrita de QR Codes (ISO/IEC 18004)** escrita
 | [`qrcode.sea`](qrcode.sea) | Ponto de entrada principal (`qrcode.encode`, `qrcode.decode`, `qrcode.read`, `qrcode.write`, `to_png`, `to_svg`, `to_terminal`) |
 | [`encode.sea`](encode.sea) | Codificador QR Code (empacotamento de bits, blocagem G1/G2, entrelaçamento e seleção automática de versão e máscara) |
 | [`decode.sea`](decode.sea) | Decodificador de matriz QR (desmascaramento, desentrelaçamento, correção Reed-Solomon e parser de bitstream) |
-| [`detector.sea`](detector.sea) | Binarização Otsu/adaptativa, scanner de Finder Patterns `1:1:3:1:1` e extrator de grade com perspectiva |
+| [`detector.sea`](detector.sea) | Binarização Otsu/adaptativa, scanner de Finder Patterns `1:1:3:1:1`, homografia e refinamento pelos Alignment Patterns |
 | [`reed_solomon.sea`](reed_solomon.sea) | Aritmética de corpo finito $\text{GF}(2^8)$ e codificador/decodificador Reed-Solomon |
 | [`matrix.sea`](matrix.sea) | Construção da matriz 2D, padrões funcionais (Finders, Alignment, Timing), 8 máscaras e cálculo de penalidade |
 | [`tables.sea`](tables.sea) | Tabelas ISO/IEC 18004 para versões 1..40, capacidades, coordenadas de alinhamento e códigos BCH |

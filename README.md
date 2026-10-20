@@ -10,7 +10,7 @@ Biblioteca completa de **leitura e escrita de QR Codes (ISO/IEC 18004)** escrita
   - Codificador polinomial e decodificador completo (**Berlekamp-Massey**, busca de **Chien** e algoritmo de **Forney**) capaz de recuperar QR Codes parcialmente danificados, rasurados ou com logotipo central
   - Decodificação BCH(15, 5) para Format Info e BCH(18, 6) para Version Info por distância de Hamming (tolerando até 3 bits corrompidos)
 - **Modos de codificação**:
-  - Detecção automática ou explícita de modo **Numérico** (`0-9`), **Alfanumérico** (tabela de 45 caracteres), **Byte / UTF-8** (acentos, emojis e dados binários), **Kanji** (leitura Shift-JIS), **ECI** e **Multi-segmento**
+  - Detecção automática ou explícita de modo **Numérico** (`0-9`), **Alfanumérico** (tabela de 45 caracteres), **Byte / UTF-8** (acentos, emojis e dados binários), **Kanji** (Shift-JIS / JIS X 0208, escrita e leitura, convertido de/para Unicode; escolhido automaticamente quando todo o texto cabe nele), **ECI** e **Multi-segmento**
   - Seleção automática da menor versão (`1..40`) e avaliação das **8 máscaras padrão (`0..7`)** pelas 4 regras de penalidade ISO/IEC 18004 (`N1..N4`)
 - **Formatos de leitura e escrita suportados**:
   - **PNG** (1-bit e 8-bit Grayscale, RGB, RGBA, Palette + filtros Paeth, Sub, Up, Average)
@@ -38,6 +38,7 @@ Biblioteca completa de **leitura e escrita de QR Codes (ISO/IEC 18004)** escrita
 | [`reed_solomon.sea`](reed_solomon.sea) | Aritmética de corpo finito $\text{GF}(2^8)$ e codificador/decodificador Reed-Solomon |
 | [`matrix.sea`](matrix.sea) | Construção da matriz 2D, padrões funcionais (Finders, Alignment, Timing), 8 máscaras e cálculo de penalidade |
 | [`tables.sea`](tables.sea) | Tabelas ISO/IEC 18004 para versões 1..40, capacidades, coordenadas de alinhamento e códigos BCH |
+| [`kanji.sea`](kanji.sea) | Modo Kanji: valores de 13 bits ↔ caracteres Unicode, pela tabela [`sjis.sea`](sjis.sea) (gerada por [`tools/gen_sjis.sea`](tools/gen_sjis.sea) com `iconv`) |
 | [`render.sea`](render.sea) | Matriz QR como imagem, ASCII, Terminal Unicode e SVG; leitura do SVG gerado (`qrcode.render`) |
 | [`libs/image`](../sea_vm/libs/image/image.sea) | (no sea_vm, compartilhada com o Sea OCR) Leitura e escrita de PNG, BMP, PGM/PPM/PBM e ASCII; `qrcode.image` a expõe |
 | [`payload.sea`](payload.sea) | Construtores e parsers de payloads PIX (BR Code + CRC16), Wi-Fi, vCard 3.0, TOTP 2FA, Mailto, SMS e Geo |

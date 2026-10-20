@@ -3,6 +3,7 @@
 local tables = require("./tables")
 local rs = require("./reed_solomon")
 local matrix = require("./matrix")
+local kanji = require("./kanji")
 
 local M = {}
 
@@ -202,13 +203,12 @@ function M.parse_bitstream(data_bytes, version)
                 if v == nil then
                     return error("decode: truncated kanji character")
                 end
-                local prod = ((v // 0xC0) << 8) | (v % 0xC0)
-                local sjis = prod + ((prod < 0x1F00) and 0x8140 or 0xC140)
-                local hi = (sjis >> 8) & 0xFF
-                local lo = sjis & 0xFF
-                chars[] = string.char(hi, lo)
-                out_bytes[] = hi
-                out_bytes[] = lo
+                -- the text gets the Unicode character, `bytes` the Shift JIS ones
+                local sj = kanji.sjis(v)
+                local ch = kanji.char(v)
+                chars[] = ch ~= "" and ch or "\u{FFFD}"
+                out_bytes[] = string.byte(sj, 1)
+                out_bytes[] = string.byte(sj, 2)
             end
             local seg_str = string.join(chars, "")
             out_chunks[] = seg_str

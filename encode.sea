@@ -3,6 +3,7 @@
 local tables = require("./tables")
 local rs = require("./reed_solomon")
 local matrix = require("./matrix")
+local kanji = require("./kanji")
 local image = require("../sea_vm/libs/image/image")
 local render = require("./render")
 
@@ -71,6 +72,9 @@ function M.detect_mode(s)
         return "numeric"
     elseif M.is_alphanumeric(s) then
         return "alphanumeric"
+    elseif kanji.values(s) ~= nil then
+        -- every character is in Shift JIS (JIS X 0208): 13 bits each
+        return "kanji"
     else
         return "byte"
     end
@@ -84,6 +88,8 @@ local function mode_name_to_id(mode_name)
         return tables.MODE_ALPHANUMERIC, "alphanumeric"
     elseif m == "byte" or m == "binary" or m == "utf8" then
         return tables.MODE_BYTE, "byte"
+    elseif m == "kanji" then
+        return tables.MODE_KANJI, "kanji"
     end
     return nil, nil
 end
@@ -94,6 +100,9 @@ local function segment_bit_length(seg, version)
     local n = len(seg.data)
     local cc_bits = tables.char_count_bits(mode_id, version)
     local data_bits = 0
+    if mode_id == tables.MODE_KANJI then
+        return 4 + cc_bits + len(seg.kanji) * 13
+    end
     if mode_id == tables.MODE_NUMERIC then
         local full_triples = n // 3
         local rem = n % 3
@@ -120,6 +129,13 @@ local function write_segment(bit_buf, seg, version)
     local s = seg.data
     local n = len(s)
     local cc_bits = tables.char_count_bits(mode_id, version)
+
+    if mode_id == tables.MODE_KANJI then
+        bit_buf:push(mode_id, 4)
+        bit_buf:push(len(seg.kanji), cc_bits)
+        for _, v in seg.kanji do bit_buf:push(v, 13) end
+        return
+    end
 
     bit_buf:push(mode_id, 4)
     bit_buf:push(n, cc_bits)
@@ -352,7 +368,12 @@ function M.encode(text, opts)
             elseif m_id == tables.MODE_ALPHANUMERIC and len(s_data) > 0 and not M.is_alphanumeric(s_data) then
                 return error("qrcode.encode: alphanumeric segment contains unsupported characters")
             end
-            segments[] = {mode_id = m_id, mode = m_norm, data = s_data}
+            local kv = nil
+            if m_id == tables.MODE_KANJI then
+                kv = kanji.values(s_data)
+                if kv == nil then return error("qrcode.encode: kanji segment contains characters outside Shift JIS") end
+            end
+            segments[] = {mode_id = m_id, mode = m_norm, data = s_data, kanji = kv}
             if not primary_mode then
                 primary_mode = m_norm
             elseif primary_mode ~= m_norm then
@@ -363,14 +384,19 @@ function M.encode(text, opts)
         local m_str = opts.mode or M.detect_mode(str)
         local m_id, m_norm = mode_name_to_id(m_str)
         if not m_id then
-            return error(`qrcode.encode: invalid mode '${m_str}' (expected numeric, alphanumeric, or byte)`)
+            return error(`qrcode.encode: invalid mode '${m_str}' (expected numeric, alphanumeric, byte, or kanji)`)
         end
         if m_id == tables.MODE_NUMERIC and len(str) > 0 and not M.is_numeric(str) then
             return error("qrcode.encode: numeric mode requested but text contains non-digits")
         elseif m_id == tables.MODE_ALPHANUMERIC and len(str) > 0 and not M.is_alphanumeric(str) then
             return error("qrcode.encode: alphanumeric mode requested but text contains invalid chars")
         end
-        segments[] = {mode_id = m_id, mode = m_norm, data = str}
+        local kv = nil
+        if m_id == tables.MODE_KANJI then
+            kv = kanji.values(str)
+            if kv == nil then return error("qrcode.encode: kanji mode requested but text has characters outside Shift JIS") end
+        end
+        segments[] = {mode_id = m_id, mode = m_norm, data = str, kanji = kv}
         primary_mode = m_norm
     end
 

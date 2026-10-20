@@ -1,0 +1,57 @@
+-- kanji.sea — QR Kanji mode: Shift JIS (JIS X 0208) characters as 13-bit values
+-- (ISO/IEC 18004 7.4.6), to and from Unicode. The table is sjis.sea
+-- (tools/gen_sjis.sea), loaded on first use.
+
+local M = {}
+
+local CHARS = nil       -- value -> character ("" where there is none)
+local VALUES = nil      -- character -> value
+
+local function load()
+    if CHARS ~= nil then return end
+    CHARS = utf8.chars(require("./sjis"))
+    VALUES = [=]
+    for v, c in CHARS do
+        if c == "\u{FFFD}" then
+            CHARS[v] = ""
+        elseif VALUES[c] == nil then
+            VALUES[c] = v
+        end
+    end
+end
+
+-- kanji.char(v) → the character of a 13-bit Kanji value ("" if none)
+function M.char(v)
+    load()
+    if v < 0 or v >= len(CHARS) then return "" end
+    return CHARS[v]
+end
+
+-- kanji.value(ch) → the 13-bit value of a character, or nil
+function M.value(ch)
+    load()
+    return VALUES[ch]
+end
+
+-- kanji.sjis(v) → the Shift JIS bytes of a 13-bit value
+function M.sjis(v)
+    local prod = ((v // 0xC0) << 8) | (v % 0xC0)
+    local code = prod + ((prod < 0x1F00) and 0x8140 or 0xC140)
+    return string.char((code >> 8) & 0xFF, code & 0xFF)
+end
+
+-- kanji.values(s) → the values of every character of s, or nil when one has
+-- none (s can then not be written in Kanji mode)
+function M.values(s)
+    if len(s) == 0 or not utf8.valid(s) then return nil end
+    load()
+    local out = []
+    for _, c in utf8.chars(s) do
+        local v = VALUES[c]
+        if v == nil then return nil end
+        out[] = v
+    end
+    return out
+end
+
+return M

@@ -1,0 +1,215 @@
+-- render.sea — QR matrices as images, ASCII, terminal half-blocks and SVG,
+-- and reading back the SVG this module writes. Everything else about images
+-- (PNG, BMP, PNM, ASCII art) is the shared libs/image of Sea.
+
+local image = require("../sea_vm/libs/image/image")
+
+local M = {}
+
+-- Convert a QR Matrix (`{ size, modules }`) into a raster Image
+-- opts: { scale = 8, border = 4, fg = 0, bg = 255, invert = false }
+function M.from_matrix(mat, opts)
+    opts = opts or {}
+    local scale = opts.scale or 8
+    if scale < 1 then scale = 1 end
+    local border = opts.border
+    if border == nil then border = 4 end
+    local fg = opts.fg
+    if fg == nil then fg = 0 end
+    local bg = opts.bg
+    if bg == nil then bg = 255 end
+    if opts.invert then
+        local tmp = fg
+        fg = bg
+        bg = tmp
+    end
+
+    local s = mat.size
+    local total_mods = s + border * 2
+    local dim = total_mods * scale
+    local img = image.new(dim, dim, bg)
+    img.binary = (fg == 0 and bg == 255) or (fg == 255 and bg == 0)
+
+    for my = 0, s - 1 do
+        for mx = 0, s - 1 do
+            if mat:get(mx, my) ~= 0 then
+                local py0 = (my + border) * scale
+                local px0 = (mx + border) * scale
+                for dy = 0, scale - 1 do
+                    local row_off = (py0 + dy) * dim + px0
+                    for dx = 0, scale - 1 do
+                        img.data[row_off + dx] = fg
+                    end
+                end
+            end
+        end
+    end
+    return img
+end
+
+-- Render a QR Matrix as multiline ASCII string
+-- opts: { border = 2, dark = "##", light = "  ", invert = false }
+function M.matrix_to_ascii(mat, opts)
+    opts = opts or {}
+    local border = opts.border
+    if border == nil then border = 2 end
+    local dark = opts.dark or "##"
+    local light = opts.light or "  "
+    if opts.invert then
+        local tmp = dark
+        dark = light
+        light = tmp
+    end
+    local s = mat.size
+    local total = s + border * 2
+    local lines = []
+    for iy = 0, total - 1 do
+        local y = iy - border
+        local row = []
+        for ix = 0, total - 1 do
+            local x = ix - border
+            local v = (x >= 0 and x < s and y >= 0 and y < s) and mat:get(x, y) or 0
+            row[] = (v ~= 0) and dark or light
+        end
+        lines[] = string.join(row, "")
+    end
+    return string.join(lines, "\n")
+end
+
+-- Render a QR Matrix using compact Unicode half-blocks (▀, ▄, █, space) for terminal display
+-- opts: { border = 2, invert = false }
+function M.matrix_to_terminal(mat, opts)
+    opts = opts or {}
+    local border = opts.border
+    if border == nil then border = 2 end
+    local inv = opts.invert and 1 or 0
+    local s = mat.size
+    local min_c = -border
+    local max_c = s + border - 1
+    local span = max_c - min_c
+    local lines = []
+
+    local function cell(x, y)
+        local v = 0
+        if x >= 0 and x < s and y >= 0 and y < s then
+            v = mat:get(x, y)
+        end
+        return v ~ inv
+    end
+
+    local y = min_c
+    while y <= max_c do
+        local row = []
+        for ix = 0, span do
+            local x = min_c + ix
+            local top = cell(x, y)
+            local bot = (y + 1 <= max_c) and cell(x, y + 1) or inv
+            if top == 1 and bot == 1 then
+                row[] = "█"
+            elseif top == 1 and bot == 0 then
+                row[] = "▀"
+            elseif top == 0 and bot == 1 then
+                row[] = "▄"
+            else
+                row[] = " "
+            end
+        end
+        lines[] = string.join(row, "")
+        y += 2
+    end
+    return string.join(lines, "\n")
+end
+
+-- Render a QR Matrix as an SVG string
+-- opts: { scale = 8, border = 4, fg_color = "#000000", bg_color = "#ffffff" }
+function M.matrix_to_svg(mat, opts)
+    opts = opts or {}
+    local scale = opts.scale or 8
+    local border = opts.border
+    if border == nil then border = 4 end
+    local fg = opts.fg_color or "#000000"
+    local bg = opts.bg_color or "#ffffff"
+    local s = mat.size
+    local total = s + border * 2
+    local dim = total * scale
+
+    local path_cmds = []
+    for y = 0, s - 1 do
+        local x = 0
+        while x < s do
+            if mat:get(x, y) ~= 0 then
+                local run = 1
+                while x + run < s and mat:get(x + run, y) ~= 0 do
+                    run += 1
+                end
+                local rx = x + border
+                local ry = y + border
+                path_cmds[] = `M${rx},${ry}h${run}v1h-${run}z`
+                x += run
+            else
+                x += 1
+            end
+        end
+    end
+
+    local d_attr = string.join(path_cmds, "")
+    local parts = [
+        `<?xml version="1.0" encoding="UTF-8"?>`,
+        `<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 ${total} ${total}" width="${dim}" height="${dim}" shape-rendering="crispEdges">`,
+    ]
+    if bg ~= "none" and bg ~= "transparent" then
+        parts[] = `  <rect width="100%" height="100%" fill="${bg}"/>`
+    end
+    parts[] = `  <path d="${d_attr}" fill="${fg}"/>`
+    parts[] = `</svg>\n`
+    return string.join(parts, "\n")
+end
+
+function M.save_svg(mat, file_path, opts)
+    return fs.write(file_path, M.matrix_to_svg(mat, opts))
+end
+
+-- Decode SVG produced by matrix_to_svg (or grid-based SVG with viewBox and <path d="Mx,y..."/>)
+function M.decode_svg(svg_str)
+    local vb = re.captures([[viewBox="\s*0\s+0\s+(\d+)\s+(\d+)\s*"]], svg_str)
+    if not vb then
+        return error("qrcode.decode_svg: missing viewBox attribute")
+    end
+    local total_w = tonumber(vb[1])
+    local total_h = tonumber(vb[2])
+    if not total_w or not total_h or total_w <= 0 or total_h <= 0 then
+        return error("qrcode.decode_svg: invalid viewBox dimensions")
+    end
+    local scale = 4
+    local img = image.new(total_w * scale, total_h * scale, 255)
+    local matches = re.all([[M(-?\d+),(-?\d+)h(\d+)v(\d+)]], svg_str)
+    if matches then
+        for _, m in matches do
+            local mx = tonumber(m.groups[1]) or 0
+            local my = tonumber(m.groups[2]) or 0
+            local mw = tonumber(m.groups[3]) or 1
+            local mh = tonumber(m.groups[4]) or 1
+            for py = my * scale, (my + mh) * scale - 1 do
+                for px = mx * scale, (mx + mw) * scale - 1 do
+                    img:set(px, py, 0)
+                end
+            end
+        end
+    end
+    return img
+end
+
+-- render.decode(bytes) → Image|error: an SVG written by matrix_to_svg, or any
+-- format libs/image reads (PNG, BMP, PNM)
+function M.decode(bytes)
+    if string.contains(bytes, "<svg") then return M.decode_svg(bytes) end
+    return image.decode(bytes)
+end
+
+-- render.load(file_path) → Image|error
+function M.load(file_path)
+    local bytes = fs.read(file_path)?
+    return M.decode(bytes)
+end
+
+return M

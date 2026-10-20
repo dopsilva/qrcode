@@ -24,7 +24,8 @@
 local tables = require("./tables")
 local rs = require("./reed_solomon")
 local matrix = require("./matrix")
-local image = require("./image")
+local image = require("../sea_vm/libs/image/image")
+local render = require("./render")
 local encode_mod = require("./encode")
 local decode_mod = require("./decode")
 local detector = require("./detector")
@@ -37,6 +38,7 @@ M.rs = rs
 M.reed_solomon = rs
 M.matrix = matrix
 M.image = image
+M.render = render
 M.detector = detector
 M.payload = payload
 
@@ -140,9 +142,9 @@ local function ascii_to_image(art)
             end
             norm_lines[] = string.join(row, "")
         end
-        return image.from_ascii(string.join(norm_lines, "\n"), {scale = 4, pad = 8})
+        return image.from_ascii(string.join(norm_lines, "\n"), {scale = 4, pad = 8, binary = true})
     end
-    return image.from_ascii(string.join(lines, "\n"), {scale = 4, pad = 8})
+    return image.from_ascii(string.join(lines, "\n"), {scale = 4, pad = 8, binary = true})
 end
 
 -- qrcode.decode_matrix(mat) → DecodeResult|error
@@ -189,15 +191,15 @@ function M.decode(source, opts)
         if (len(source) >= 8 and string.sub(source, 1, 8) == "\x89PNG\r\n\x1a\n") or
             (len(source) >= 54 and string.sub(source, 1, 2) == "BM") or
             string.contains(source, "<svg") then
-            img = image.decode(source)?
+            img = render.decode(source)?
         elseif len(source) >= 3 and string.sub(source, 1, 1) == "P" and
             string.sub(source, 2, 2) >= "1" and string.sub(source, 2, 2) <= "6" and
             (string.byte(source, 3) == 10 or string.byte(source, 3) == 32 or string.byte(source, 3) == 13) then
-            img = image.decode(source)?
+            img = render.decode(source)?
         elseif string.contains(source, "\n") then
             img = ascii_to_image(source)?
         elseif fs.isfile(source) then
-            img = image.load(source)?
+            img = render.load(source)?
         else
             return error(`qrcode.decode: file not found or unrecognized source format: ${source}`)
         end

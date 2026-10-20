@@ -3,7 +3,8 @@
 local tables = require("./tables")
 local rs = require("./reed_solomon")
 local matrix = require("./matrix")
-local image = require("./image")
+local image = require("../sea_vm/libs/image/image")
+local render = require("./render")
 
 local M = {}
 
@@ -268,45 +269,45 @@ function QRCodeMethods.is_dark(self, x, y)
 end
 
 function QRCodeMethods.to_image(self, opts)
-    return image.from_matrix(self.matrix, opts)
+    return render.from_matrix(self.matrix, opts)
 end
 
 function QRCodeMethods.to_png(self, opts)
-    local img = image.from_matrix(self.matrix, opts)
+    local img = render.from_matrix(self.matrix, opts)
     return image.encode_png(img)
 end
 
 function QRCodeMethods.to_bmp(self, opts)
-    local img = image.from_matrix(self.matrix, opts)
+    local img = render.from_matrix(self.matrix, opts)
     return image.encode_bmp(img)
 end
 
 function QRCodeMethods.to_pgm(self, opts)
-    local img = image.from_matrix(self.matrix, opts)
+    local img = render.from_matrix(self.matrix, opts)
     return image.encode_pgm(img)
 end
 
 function QRCodeMethods.to_pbm(self, opts)
-    local img = image.from_matrix(self.matrix, opts)
+    local img = render.from_matrix(self.matrix, opts)
     return image.encode_pbm(img)
 end
 
 function QRCodeMethods.to_svg(self, opts)
-    return image.matrix_to_svg(self.matrix, opts)
+    return render.matrix_to_svg(self.matrix, opts)
 end
 
 function QRCodeMethods.to_ascii(self, opts)
-    return image.matrix_to_ascii(self.matrix, opts)
+    return render.matrix_to_ascii(self.matrix, opts)
 end
 
 function QRCodeMethods.to_terminal(self, opts)
-    return image.matrix_to_terminal(self.matrix, opts)
+    return render.matrix_to_terminal(self.matrix, opts)
 end
 
 function QRCodeMethods.save(self, file_path, opts)
     local ext = string.lower(path.ext(file_path))
     if ext == ".svg" then
-        return image.save_svg(self.matrix, file_path, opts)
+        return render.save_svg(self.matrix, file_path, opts)
     elseif ext == ".txt" or ext == ".asc" then
         return fs.write(file_path, self:to_ascii(opts) .. "\n")
     else

@@ -1,6 +1,6 @@
 # Sea QRCode
 
-Biblioteca completa de **leitura e escrita de QR Codes (ISO/IEC 18004)** escrita em **[Sea](https://github.com/dopsilva/sea)** (<https://github.com/dopsilva/sea>), utilizando `libs/compress` para leitura e escrita nativa de imagens PNG.
+Biblioteca completa de **leitura e escrita de QR Codes (ISO/IEC 18004)** escrita em **[Sea](https://github.com/dopsilva/sea)** (<https://github.com/dopsilva/sea>), utilizando `libs/image` (com `libs/compress` para PNG) para leitura e escrita de imagens.
 
 ## Recursos
 
@@ -38,7 +38,8 @@ Biblioteca completa de **leitura e escrita de QR Codes (ISO/IEC 18004)** escrita
 | [`reed_solomon.sea`](reed_solomon.sea) | Aritmética de corpo finito $\text{GF}(2^8)$ e codificador/decodificador Reed-Solomon |
 | [`matrix.sea`](matrix.sea) | Construção da matriz 2D, padrões funcionais (Finders, Alignment, Timing), 8 máscaras e cálculo de penalidade |
 | [`tables.sea`](tables.sea) | Tabelas ISO/IEC 18004 para versões 1..40, capacidades, coordenadas de alinhamento e códigos BCH |
-| [`image.sea`](image.sea) | Leitura, escrita e renderização em PNG, SVG, BMP, PGM/PPM/PBM, ASCII e Terminal Unicode |
+| [`render.sea`](render.sea) | Matriz QR como imagem, ASCII, Terminal Unicode e SVG; leitura do SVG gerado (`qrcode.render`) |
+| [`libs/image`](../sea_vm/libs/image/image.sea) | (no sea_vm, compartilhada com o Sea OCR) Leitura e escrita de PNG, BMP, PGM/PPM/PBM e ASCII; `qrcode.image` a expõe |
 | [`payload.sea`](payload.sea) | Construtores e parsers de payloads PIX (BR Code + CRC16), Wi-Fi, vCard 3.0, TOTP 2FA, Mailto, SMS e Geo |
 | [`qrcode_test.sea`](qrcode_test.sea) | Suíte de testes automatizados (`sea test`) |
 

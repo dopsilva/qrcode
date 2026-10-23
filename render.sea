@@ -2,7 +2,7 @@
 -- and reading back the SVG this module writes. Everything else about images
 -- (PNG, BMP, PNM, ASCII art) is the shared libs/image of Sea.
 
-local image = require("../sea_vm/libs/image/image")
+local image = require("image")
 
 local M = {}
 

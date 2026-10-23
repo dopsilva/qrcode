@@ -4,7 +4,7 @@ local tables = require("./tables")
 local rs = require("./reed_solomon")
 local matrix = require("./matrix")
 local kanji = require("./kanji")
-local image = require("../sea_vm/libs/image/image")
+local image = require("image")
 local render = require("./render")
 
 local M = {}
